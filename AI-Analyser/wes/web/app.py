@@ -84,13 +84,19 @@ CLASSES = ["Pathogenic", "Likely pathogenic", "Uncertain significance", "Likely 
 # background jobs already not surviving a restart. Set WES_USERS to require login.
 _USERS = dict(u.split(":", 1) for u in settings.users.split(",") if ":" in u)
 templates.env.globals["show_logout"] = bool(_USERS)
+templates.env.globals["login_enabled"] = bool(_USERS) or settings.trust_user_header
+if not templates.env.globals["login_enabled"]:
+    log.warning("WES_USERS is not set: login is disabled and anyone who can reach this server can "
+                "view, edit, approve and delete cases")
 _SESSIONS: dict[str, str] = {}  # token -> username
 SESSION_COOKIE = "wes_session"
 
 
 def current_user(request: Request) -> str:
+    if settings.trust_user_header and request.headers.get("X-User"):
+        return request.headers["X-User"]
     if not _USERS:
-        return request.headers.get("X-User", "lab-user")
+        return "lab-user"
     token = request.cookies.get(SESSION_COOKIE)
     if token and token in _SESSIONS:
         return _SESSIONS[token]
@@ -127,7 +133,9 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
     if username in _USERS and secrets.compare_digest(_USERS[username], password):
         token = secrets.token_urlsafe(32)
         _SESSIONS[token] = username
-        resp = RedirectResponse(next or "/", status_code=303)
+        # only same-site paths: "//host" or "/\host" would send the user to another site
+        safe_next = next if next.startswith("/") and not next.startswith(("//", "/\\")) else "/"
+        resp = RedirectResponse(safe_next, status_code=303)
         resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 14)
         return resp
     return templates.TemplateResponse(request, "login.html", {"next": next, "error": "Incorrect username or password"},
@@ -155,13 +163,31 @@ def _case_or_404(db, case_id: int) -> Case:
 
 
 def _new_accession(db) -> str:
-    stamp = datetime.now().strftime("%y%m%d")
-    n = db.query(Case).filter(Case.accession.like(f"WES{stamp}%")).count() + 1
-    return f"WES{stamp}{n:03d}"
+    # next number after the highest used today - a count would reuse a number once a case is deleted
+    prefix = f"WES{datetime.now().strftime('%y%m%d')}"
+    used = db.scalars(select(Case.accession).where(Case.accession.like(f"{prefix}%"))).all()
+    nums = [int(a[len(prefix):]) for a in used if a[len(prefix):].isdigit()]
+    return f"{prefix}{max(nums, default=0) + 1:03d}"
 
 
 def _safe_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "upload.vcf"
+
+
+def _safe_accession(raw: str) -> str:
+    """The accession names the case's upload/work folders, so it must never be
+    '.', '..' or start with a dot (deleting such a case would remove data/)."""
+    acc = re.sub(r"[^A-Za-z0-9._-]", "_", raw.strip())[:64]
+    if not acc or acc.startswith("."):
+        raise HTTPException(400, "Accession must start with a letter, digit, '_' or '-'")
+    return acc
+
+
+def _case_dir(base: Path, accession: str) -> Path:
+    d = (base / accession).resolve()
+    if d.parent != base.resolve():
+        raise HTTPException(500, f"Refusing to touch a folder outside {base.name}/ for accession {accession!r}")
+    return d
 
 
 async def _save_upload(up: UploadFile, dest_dir: Path) -> Path:
@@ -254,10 +280,10 @@ async def create_case(
         raise HTTPException(400, "Clinical history is required - the analysis cannot judge which findings "
                              "are relevant to the patient without it")
     form = await request.form()
-    acc = _safe_name(accession.strip()) if accession.strip() else _new_accession(db)
+    acc = _safe_accession(accession) if accession.strip() else _new_accession(db)
     if db.scalar(select(Case).where(Case.accession == acc)):
         raise HTTPException(400, f"Accession {acc} already exists")
-    updir = settings.uploads_dir / acc
+    updir = _case_dir(settings.uploads_dir, acc)
 
     manual_hpo = []
     for tok in re.findall(r"HP:\d{7}", hpo):
@@ -540,7 +566,9 @@ def approve(case_id: int, db=Depends(get_db), user=Depends(current_user), approv
         raise HTTPException(409, "Only reviewed cases can be approved")
     if not c.final_flag:
         raise HTTPException(409, "Save the review (confirm the result flag) before approving")
-    c.approved_by = approver.strip() or user
+    # with login enabled the approver is the signed-in user, never a typed name; the free-text
+    # field only exists for installs without login, where there is no identity to use
+    c.approved_by = user if (_USERS or settings.trust_user_header) else (approver.strip() or user)
     c.approved_at = now()
     c.report_version += 1
     c.status = "approved"
@@ -578,7 +606,7 @@ def delete_case(case_id: int, db=Depends(get_db), user=Depends(current_user)):
         raise HTTPException(409, f"{c.status.capitalize()} cases cannot be deleted - reopen first if you need to change it")
     if c.status in ("processing", "queued"):
         raise HTTPException(409, "Wait for the analysis to finish")
-    for d in (settings.uploads_dir / c.accession, settings.work_dir / c.accession):
+    for d in (_case_dir(settings.uploads_dir, c.accession), _case_dir(settings.work_dir, c.accession)):
         shutil.rmtree(d, ignore_errors=True)
     db.delete(c)
     db.commit()

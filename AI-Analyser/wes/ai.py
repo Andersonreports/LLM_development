@@ -124,14 +124,31 @@ def _call(system: str, user: str, schema: type[BaseModel], effort: str, max_toke
     return parsed, usage
 
 
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_PHONE_RE = re.compile(r"(?<!\w)\+?\d[\d -]{8,}\d(?!\w)")
+# words of hospital names / titles that must not be redacted on their own
+_GENERIC_WORDS = {
+    "hospital", "hospitals", "clinic", "clinics", "medical", "centre", "center", "college", "institute",
+    "children's", "childrens", "child", "health", "care", "research", "sciences", "general", "city",
+    "the", "and", "for", "of", "mrs", "miss", "prof", "baby", "master", "proband", "father", "mother",
+    "partner1", "partner2",
+}
+_DATE_RE = re.compile(r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b")
+
+
 def scrub(text: str, identifiers: list[str]) -> str:
+    """Remove identifiers before text is sent to the API. Names are matched as whole
+    words only (a patient called "Ram" must not turn "parameter" into "pa[REDACTED]eter");
+    e-mail addresses, phone numbers and calendar dates are removed regardless."""
     out = text or ""
-    for ident in identifiers:
-        for tok in [ident] + ident.split():
-            tok = tok.strip()
-            if len(tok) >= 3:
-                out = re.sub(re.escape(tok), "[REDACTED]", out, flags=re.IGNORECASE)
-    return out
+    toks = {t.strip(" ,.") for ident in identifiers if ident for t in [ident, *ident.split()]}
+    toks = {t for t in toks if len(t) >= 3 and t.lower() not in _GENERIC_WORDS}
+    # longest first, so a full name is replaced before its parts
+    for tok in sorted(toks, key=len, reverse=True):
+        out = re.sub(r"(?<!\w)" + re.escape(tok) + r"(?!\w)", "[REDACTED]", out, flags=re.IGNORECASE)
+    out = _EMAIL_RE.sub("[REDACTED]", out)
+    out = _PHONE_RE.sub("[REDACTED]", out)
+    return _DATE_RE.sub("[DATE]", out)
 
 
 # ------------------------------------------------------------------ prompts

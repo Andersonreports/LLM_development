@@ -82,9 +82,9 @@ def run_case(case_id: int, ai_only: bool = False) -> None:
 
 
 def _identifiers(case: Case) -> list[str]:
-    ids = []
+    ids = [x for x in (case.referring_clinician, case.hospital, case.accession) if x]
     for s in case.samples:
-        ids += [x for x in (s.name, s.patient_id) if x]
+        ids += [x for x in (s.name, s.patient_id, s.pin, s.sample_number) if x]
     return ids
 
 
@@ -272,6 +272,11 @@ def _clinical_context(case: Case) -> dict:
 def _run_ai(db, case: Case) -> None:
     results = case.results or {}
     pool = _all_variants(results)
+    # every path below writes a fresh draft, so the previously confirmed flag no longer
+    # belongs to it: the reviewer must save the new review before it can be approved
+    if (case.review or {}).get("edited_by"):
+        _event(db, case, "warning", f"Previous review saved by {case.review['edited_by']} was replaced by a new draft")
+    case.final_flag = None
     if not ai.available():
         _event(db, case, "stage", "[ai:skipped] AI interpretation skipped - AI assistant not configured")
         _event(db, case, "warning", "AI assistant is not configured (no API key set) - a rule-based draft was prepared instead. You can still review and edit everything below.")

@@ -94,6 +94,9 @@ class Settings:
 
     # Optional HTTP basic auth, "user:password,user2:password2"
     users: str = _env("WES_USERS", "")
+    # Take the user name from an X-User header set by an SSO reverse proxy. Only enable this
+    # when the proxy strips any X-User header sent by the browser - otherwise anyone can claim any name
+    trust_user_header: bool = _env("WES_TRUST_USER_HEADER", False)
 
     @property
     def uploads_dir(self) -> Path:
