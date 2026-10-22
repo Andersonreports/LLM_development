@@ -6,7 +6,7 @@
 #   ./scripts/download_resources.sh small      # everything except VEP cache + FASTA
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RES="$ROOT/resources"
+RES="${WES_RESOURCES_DIR:-$ROOT/resources}"
 BIN="${WES_TOOLS_BIN:-$ROOT/tools/mamba/envs/wes/bin}"
 export PATH="$BIN:$PATH"
 MODE="${1:-all}"
