@@ -168,7 +168,8 @@
             <div class="actions">
               <button class="danger" type="button" id="rejectBtn">{{ icon('x-circle') }} Reject</button>
               <form method="post" action="/cases/{{ case.id }}/approve" class="actions inline" onsubmit="return confirm('Approve and issue the final report? Make sure the review has been saved.')">
-                <input type="text" name="approver" value="{{ user }}" style="width:180px" placeholder="Approving scientist">
+                {% if login_enabled %}<span class="small muted">Approving as <b>{{ user }}</b></span>
+                {% else %}<input type="text" name="approver" value="{{ user }}" style="width:180px" placeholder="Approving scientist">{% endif %}
                 <button class="success" id="approveBtn" {% if not case.final_flag %}disabled title="Save the review first"{% endif %}>{{ icon('shield') }} Approve &amp; issue report</button>
               </form>
             </div>
