@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ title }} - {{ case.accession }}</title>
+<style>
+  @page {
+    size: Letter; margin: 24mm 15mm 18mm 17mm;
+    @right-middle {
+      content: "Page " counter(page) " of " counter(pages);
+      font: 9pt "Liberation Sans", Arial, sans-serif; color: #000; white-space: nowrap;
+      transform: rotate(-90deg); text-align: center; width: 30mm;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "Liberation Sans", Arial, Helvetica, sans-serif; font-size: 9.33pt; line-height: 1.5; color: #232529; }
+  h1 { font-family: "Trebuchet MS", "Ubuntu", "DejaVu Sans", Arial, sans-serif; font-size: 22pt; font-weight: bold; color: #155da6;
+       text-align: center; margin: 0 0 4px; letter-spacing: .3px; }
+  .subtitle { text-align: center; color: #444; font-size: 9.5pt; margin: 0 0 10px; }
+  h2 { font-size: 11.3pt; font-weight: bold; color: #1a467c; margin: 15px 0 5px; page-break-after: avoid; }
+  .subhead { page-break-after: avoid; }
+  p { margin: 0 0 6px; }
+  .letterhead { text-align: left; margin: -12mm 0 4mm; }
+  .letterhead img { max-width: 100%; max-height: 22mm; }
+
+  table.info { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  table.info td { width: 50%; background: #f0f0f0; border: 1px solid #222; padding: 7px 9px; font-weight: bold; font-size: 9.33pt; color: #0d0f13; height: 29px; vertical-align: middle; }
+  table.info td.blank { background: #f0f0f0; }
+  table.fam { width: 100%; border-collapse: collapse; margin: 2px 0 8px; font-size: 8.8pt; }
+  table.fam th, table.fam td { border: 1px solid #222; padding: 3px 7px; text-align: left; }
+  table.fam th { background: #f0f0f0; }
+  .who { font-weight: bold; color: #1a467c; margin: 8px 0 3px; }
+
+  .box { border: 2px solid #111; text-align: center; font-weight: bold; padding: 7px 10px; margin: 6px 24px 8px 24px; font-size: 9.33pt; page-break-inside: avoid; }
+  .box.NEGATIVE { color: #25a76a; }
+  .box.POSITIVE { color: #c0392b; }
+  .box.INCONCLUSIVE { color: #b26a00; }
+  .box.CARRIER { color: #1a467c; }
+  .foot { font-size: 8pt; color: #232529; margin: 0 0 2px; padding-left: 4px; }
+
+  ul { margin: 2px 0 6px 0; padding-left: 20px; }
+  li { margin-bottom: 3px; }
+  .just { text-align: justify; }
+
+  table.attr { margin: 6px auto 10px; border-collapse: collapse; width: 56%; }
+  table.attr td { border: 1px solid #111; padding: 6px 10px; text-align: center; font-size: 9.33pt; color: #0d0f13; }
+  table.attr td + td { font-weight: bold; }
+
+  table.cls { width: 100%; border-collapse: collapse; margin: 6px 0 10px; page-break-inside: avoid; }
+  table.cls th { background: #fabe8f; border: 1px solid #111; padding: 6px; font-size: 9.33pt; color: #0d0f13; }
+  table.cls td { border: 1px solid #111; padding: 4px 7px; font-size: 9.33pt; color: #0d0f13; vertical-align: middle; }
+  table.cls td:first-child { text-align: center; width: 17%; }
+
+  table.var { width: 100%; border-collapse: collapse; margin: 4px 0 8px; page-break-inside: avoid; }
+  table.var th { background: #efefef; border: 1px solid #222; padding: 4px 6px; font-size: 8.4pt; text-align: left; }
+  table.var td { border: 1px solid #222; padding: 4px 6px; font-size: 8.4pt; vertical-align: top; }
+  .mono { font-family: "DejaVu Sans Mono", monospace; font-size: 7.8pt; }
+  .cls-P, .cls-LP { color: #b3261e; font-weight: bold; }
+  .cls-VUS { color: #9a5b00; font-weight: bold; }
+  .muted { color: #555; }
+  .small { font-size: 7.8pt; }
+  .interp { text-align: justify; margin: 2px 0 6px; }
+
+  .signs { margin-top: 12px; page-break-inside: avoid; }
+  .signs img { width: 100%; display: block; }
+  table.sig { width: 100%; border-collapse: collapse; }
+  table.sig td { width: 20%; padding: 26px 4px 0; vertical-align: top; font-size: 8.8pt; border: none; }
+  table.sig td b { display: block; }
+  table.sig td.line { border-top: 1px solid #777; }
+
+  table.gene { border-collapse: collapse; width: 100%; margin-top: 6px; font-size: 8pt; font-family: Calibri, Carlito, "Liberation Sans", Arial, sans-serif; }
+  table.gene th, table.gene td { border: 1px solid #111; padding: 2px 5px; text-align: center; }
+  table.gene th { font-weight: normal; font-size: 8pt; line-height: 1.2; }
+  table.gene td.g { font-style: italic; }
+  .appendix { page-break-before: always; }
+  .watermark { position: fixed; top: 38%; left: 8%; font-size: 100pt; color: rgba(190, 40, 30, .09); transform: rotate(-30deg); font-weight: bold; z-index: -1; }
+  .draftnote { color: #b3261e; font-size: 8.5pt; margin-top: 8px; }
+</style>
+</head>
+<body>
+{% if not final %}<div class="watermark">DRAFT</div>{% endif %}
+
+{% if letterhead_img %}<div class="letterhead"><img src="{{ letterhead_img }}"></div>{% endif %}
+
+<h1>{{ title }}</h1>
+{% if subtitle %}<div class="subtitle">{{ subtitle }}</div>{% endif %}
+
+{# ------------------------------------------------ patient / sample details #}
+{% macro infogrid(s, first_grid) %}
+<table class="info">
+  <tr><td>Patient ID: {{ s.patient_id or s.name }}</td><td>PIN: {{ s.pin or '' }}</td></tr>
+  <tr><td>Age: {{ s.age|age }}</td><td>Gender: {{ (s.sex or '')|capitalize }}</td></tr>
+  <tr><td>Hospital/Clinic: {{ case.hospital or '' }}</td><td>Sample Number: {{ s.sample_number or '' }}</td></tr>
+  <tr><td>Referring Clinician: {{ case.referring_clinician or '' }}</td><td>Sample Collection Date: {{ s.collected_on|date }}</td></tr>
+  <tr><td>Specimen: {{ s.sample_type or '' }}</td><td>Sample Received Date: {{ s.received_on|date }}</td></tr>
+  <tr><td class="blank"></td><td>{% if first_grid %}Report Date: {{ report_date }}{% endif %}</td></tr>
+</table>
+{% endmacro %}
+
+{% if case.case_type == 'couple' %}
+  {% for s in samples %}<div class="who">{{ role_label[s.role] }}</div>{{ infogrid(s, loop.first) }}{% endfor %}
+{% else %}
+  {{ infogrid(first, true) }}
+  {% if case.case_type == 'trio' %}
+  <table class="fam">
+    <tr><th>Family member</th><th>Patient ID</th><th>Age</th><th>Gender</th><th>Sample Number</th><th>Collected</th><th>Received</th></tr>
+    {% for s in samples if s.role != 'proband' %}
+    <tr><td>{{ role_label[s.role] }}{{ ' (affected)' if s.affected else '' }}</td><td>{{ s.patient_id or s.name }}</td><td>{{ s.age|age }}</td><td>{{ (s.sex or '')|capitalize }}</td><td>{{ s.sample_number or '' }}</td><td>{{ s.collected_on|date }}</td><td>{{ s.received_on|date }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+{% endif %}
+
+{# ------------------------------------------------ clinical history #}
+<h2>Clinical History</h2>
+<p class="just">{{ clinical_history }}</p>
+
+{# ------------------------------------------------ results #}
+{% macro vtable(rows) %}
+<table class="var">
+  <tr><th>Gene (transcript)</th><th>Variant</th><th>Zygosity</th>{% if case.case_type == 'trio' %}<th>Inheritance</th>{% endif %}<th>Disease (inheritance)</th><th>Classification</th></tr>
+  {% for r in rows %}
+  <tr>
+    <td><i><b>{{ r.gene }}</b></i><br><span class="mono">{{ r.transcript }}</span><br><span class="small muted">{{ r.exon }}</span></td>
+    <td class="mono">{{ r.hgvsc }}<br>{{ r.hgvsp }}<br><span class="muted">{{ r.genomic }}{% if r.rsid %} | {{ r.rsid }}{% endif %}</span><br><span class="small muted">{{ r.consequence }}</span></td>
+    <td>{% for k, z in r.zygosity.items() %}{% if r.zygosity|length > 1 %}{{ k }}: {% endif %}{{ z }}<br>{% endfor %}</td>
+    {% if case.case_type == 'trio' %}<td>{{ r.origin or '-' }}</td>{% endif %}
+    <td>{{ r.disease or '-' }}{% if r.disease_inheritance %}<br><span class="muted">({{ r.disease_inheritance }})</span>{% endif %}</td>
+    <td class="cls-{{ r.short }}">{{ r.classification }}<br><span class="small muted" style="font-weight:normal">{{ r.criteria }}</span></td>
+  </tr>
+  {% endfor %}
+</table>
+{% for r in rows %}{% if r.interpretation %}<div class="interp"><b><i>{{ r.gene }}</i> {{ r.hgvsc }}{% if r.hgvsp %} {{ r.hgvsp }}{% endif %}:</b> {{ r.interpretation }}</div>{% endif %}{% endfor %}
+{% endmacro %}
+
+<h2>Results</h2>
+<div class="box {{ flag }}">{{ result_text }}</div>
+
+{% if flag == 'NEGATIVE' and case.case_type != 'couple' %}
+  {% for line in negative_footnote %}<p class="foot">{{ line }}</p>{% endfor %}
+{% else %}
+  {% if summary_line %}<p><b>{{ summary_line }}</b></p>{% endif %}
+  {% if case.case_type == 'couple' and at_risk %}
+  <table class="var">
+    <tr><th>Gene</th><th>Partner 1</th><th>Partner 2</th><th>Condition</th><th>Inheritance</th><th>Risk to offspring</th></tr>
+    {% for r in at_risk %}<tr><td><i>{{ r.gene }}</i></td><td class="mono">{{ r.p1|join(', ') or 'Not detected' }}</td><td class="mono">{{ r.p2|join(', ') or 'Not detected' }}</td><td>{{ r.diseases }}</td><td>{{ r.mode }}</td><td>{{ r.risk }}</td></tr>{% endfor %}
+  </table>
+  {% endif %}
+  {% if sections.primary %}{{ vtable(sections.primary) }}{% endif %}
+  {% if sections.vus %}<p class="subhead"><b>Variants of uncertain significance relevant to the indication</b></p>{{ vtable(sections.vus) }}{% endif %}
+  {% if sections.carrier %}<p class="subhead"><b>Carrier findings</b></p>{{ vtable(sections.carrier) }}{% endif %}
+  {% if clinical_interpretation %}{% for para in clinical_interpretation.split('\n') if para.strip() %}<div class="interp">{{ para }}</div>{% endfor %}{% endif %}
+  <p class="foot">*Genetic test results are based on the recommendation of American college of Medical Genetics [1].</p>
+{% endif %}
+
+{% if secondary_requested %}
+<h2>Secondary findings (ACMG, {{ sf_gene_count }} genes)</h2>
+{% if sections.secondary %}{{ vtable(sections.secondary) }}
+{% else %}<p>No reportable pathogenic or likely pathogenic variants were identified in the ACMG secondary findings genes analysed.</p>{% endif %}
+{% endif %}
+
+{% if case.case_type != 'couple' and cnv_text %}
+<h2>CNV Findings</h2>
+<p>{{ cnv_text }}</p>
+{% endif %}
+
+{% if recommendations %}
+<h2>Recommendations</h2>
+<ul>{% for r in recommendations %}<li>{{ r }}</li>{% endfor %}</ul>
+{% endif %}
+
+<h2>Methodology</h2>
+<p class="just">{{ methodology }}</p>
+
+{% if seq_total_gb or seq_q30 %}
+<h2>Sequence data attributes</h2>
+<table class="attr">
+  {% if seq_total_gb %}<tr><td>Total Read Generated</td><td>{{ seq_total_gb }}</td></tr>{% endif %}
+  {% if seq_q30 %}<tr><td>Data &ge; Q30</td><td>{{ seq_q30 }}</td></tr>{% endif %}
+</table>
+{% endif %}
+
+<p class="just" style="margin-top:8px">{{ classification_intro }}</p>
+<table class="cls">
+  <tr><th style="width:17%">Classification</th><th>Interpretation</th></tr>
+  {% for name, text in classification_table %}<tr><td>{{ name }}</td><td>{{ text }}</td></tr>{% endfor %}
+</table>
+
+<h2>Disclaimer</h2>
+<ul class="just">{% for d in disclaimer %}<li>{{ d|safe }}</li>{% endfor %}</ul>
+
+<h2>References</h2>
+<ol class="small just" style="padding-left:16px;margin:2px 0 0">{% for r in references %}<li>{{ r }}</li>{% endfor %}</ol>
+
+<h2>This report has been reviewed and approved by:</h2>
+<div class="signs">
+  {% if signature_img %}
+    <img src="{{ signature_img }}" alt="Signatures">
+  {% else %}
+    <table class="sig"><tr>{% for name, role in signatories %}<td class="line"><b>{{ name }}</b>{{ role }}</td>{% endfor %}</tr></table>
+  {% endif %}
+</div>
+{% if not final %}<p class="draftnote">DRAFT - not for clinical use until reviewed and approved. Signatures are applied on approval.</p>{% endif %}
+
+{# ------------------------------------------------ appendix #}
+{% if gene_table and gene_table.genes %}
+<div class="appendix">
+  <h2>Appendix 1: Gene {{ 'Coverage' if gene_table.coverage else 'List' }}</h2>
+  <h2 style="margin-top:2px">Indication Based Analysis:</h2>
+  {% set n = 4 %}
+  <table class="gene">
+    <tr>{% for i in range(n) %}<th>Gene Name</th>{% if gene_table.coverage %}<th>Percentage of coding region covered</th>{% endif %}{% endfor %}</tr>
+    {% for row in gene_table.genes|batch(n, '') %}
+    <tr>{% for g in row %}
+      {% if g %}<td class="g">{{ g }}</td>{% if gene_table.coverage %}<td>{{ '%.1f'|format(gene_table.coverage[g]) if gene_table.coverage[g] is not none else '-' }}</td>{% endif %}
+      {% else %}<td></td>{% if gene_table.coverage %}<td></td>{% endif %}{% endif %}
+    {% endfor %}</tr>
+    {% endfor %}
+  </table>
+  {% if not gene_table.coverage %}<p class="small muted" style="margin-top:6px">Genes selected for the reported clinical indication. Per-gene coverage was not supplied for this case.</p>{% endif %}
+</div>
+{% endif %}
+</body>
+</html>

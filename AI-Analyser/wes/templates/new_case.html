@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, pedigree %}
+{% block title %}New case - Exome AI{% endblock %}
+{% block crumbs %}<a href="/">Cases</a> / <b>New case</b>{% endblock %}
+{% block content %}
+<div class="page-head" style="max-width:900px;margin:0 auto 20px">
+  <div><h1>New case</h1><p>Upload the VCF and clinical history, then start. Everything else (patient ID, sample details, report wording) is filled in later, once results are ready to report.</p></div>
+</div>
+
+<form method="post" action="/cases" enctype="multipart/form-data" id="caseForm" class="stack" style="max-width:900px;margin:0 auto">
+
+<div class="card card-pad">
+  <div class="step"><div class="step-num">1</div><div class="step-body">
+    <div class="step-title">Case type</div>
+    <div class="type-cards">
+      <label class="type-card"><input type="radio" name="case_type" value="single" checked>
+        <div class="pg">{{ pedigree('single') }}</div><b>Single</b><span>Proband only</span></label>
+      <label class="type-card"><input type="radio" name="case_type" value="trio">
+        <div class="pg">{{ pedigree('trio') }}</div><b>Trio</b><span>Proband + both parents</span></label>
+      <label class="type-card"><input type="radio" name="case_type" value="couple">
+        <div class="pg">{{ pedigree('couple') }}</div><b>Couple</b><span>Carrier screening</span></label>
+    </div>
+  </div></div>
+</div>
+
+<div class="card card-pad">
+  <div class="step"><div class="step-num">2</div><div class="step-body">
+    <div class="step-title">Samples</div>
+    <p class="step-sub" id="samplesSub">GRCh38 VCF (.vcf or .vcf.gz).</p>
+    <label class="drop hidden" id="combinedDrop" style="margin-bottom:14px">
+      {{ icon('upload') }}
+      <div><div class="t">Combined multi-sample VCF <span class="muted" style="font-weight:400">(optional)</span></div>
+        <div class="s">If one file already contains everyone, upload it here instead of separately below.</div></div>
+      <input type="file" name="combined_vcf" accept=".vcf,.gz">
+    </label>
+    <div class="grid g3" id="roleCards"></div>
+  </div></div>
+</div>
+
+<div class="card card-pad">
+  <div class="step"><div class="step-num">3</div><div class="step-body">
+    <div class="step-title">Clinical history</div>
+    <p class="step-sub pheno-only">This is what the analysis is matched against - be as specific as possible. HPO phenotype terms are matched directly from this text (and refined further by AI if configured).</p>
+    <div class="pheno-only">
+      <label>Clinical history <span style="color:var(--pos)">*</span></label>
+      <textarea name="clinical_history" rows="7" placeholder="Age at onset, presenting features, examination findings, investigations, family history, suspected diagnosis..." required></textarea>
+    </div>
+    <div class="couple-only hidden" style="margin-top:14px">
+      <label>Reason for screening</label>
+      <textarea name="clinical_history" rows="3" placeholder="e.g. Pre-conception carrier screening"></textarea>
+    </div>
+    <div class="grid g2" style="margin-top:14px">
+      <div><label>Consanguinity</label>
+        <select name="consanguinity"><option value="unknown">Not stated</option><option value="yes">Yes</option><option value="no">No</option></select></div>
+      <div class="pheno-only"><label>Accession <span class="muted" style="font-weight:400">(optional - auto-generated if blank)</span></label><input type="text" name="accession"></div>
+    </div>
+  </div></div>
+</div>
+
+<div class="card card-pad">
+  <div class="step"><div class="step-num">4</div><div class="step-body">
+    <div class="step-title">Consent</div>
+    <div class="stack">
+      <label class="check"><input type="checkbox" name="consent_secondary" value="true"> Report ACMG secondary findings (SF v3.2)</label>
+      <label class="check pheno-only"><input type="checkbox" name="consent_carrier" value="true"> Report carrier status (AR / X-linked)</label>
+    </div>
+  </div></div>
+</div>
+
+<div class="submit-bar">
+  <span class="small muted" id="submitNote"></span>
+  <a class="btn ghost" href="/">Cancel</a>
+  <button type="submit" id="submitBtn">{{ icon('play') }} Start analysis</button>
+</div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+const ROLE_SETS = {
+  single: [["proband", "Proband"]],
+  trio: [["proband", "Proband"], ["father", "Father"], ["mother", "Mother"]],
+  couple: [["partner1", "Partner 1"], ["partner2", "Partner 2"]],
+};
+const DEFAULT_SEX = {father: "male", mother: "female", partner1: "female", partner2: "male"};
+const UPLOAD_ICON = `{{ icon('upload')|replace('\n', '') }}`;
+
+function roleCard(role, label) {
+  const sex = DEFAULT_SEX[role] || "";
+  const aff = (role === "father" || role === "mother")
+    ? `<label class="check xs"><input type="checkbox" name="${role}_affected" value="true"> Affected</label>`
+    : (role === "proband" ? '<span class="flag flag-POSITIVE" style="font-size:10.5px">AFFECTED</span>' : "");
+  return `<div class="role-card">
+    <div class="rc-head"><b>${label}</b>${aff}</div>
+    <div class="grid g2" style="gap:10px">
+      <div><label>Name</label><input type="text" name="${role}_name" required></div>
+      <div><label>Sex</label><select name="${role}_sex" required>
+        <option value="">-</option><option value="male" ${sex === "male" ? "selected" : ""}>Male</option>
+        <option value="female" ${sex === "female" ? "selected" : ""}>Female</option></select></div>
+    </div>
+    <label class="drop" style="margin-top:12px">${UPLOAD_ICON}
+      <div><div class="t" data-name>Choose or drop VCF</div><div class="s">.vcf / .vcf.gz &middot; GRCh38</div></div>
+      <input type="file" name="${role}_vcf" accept=".vcf,.gz"></label>
+    <div style="margin-top:8px"><label class="xs muted" style="font-weight:500">Sample column in VCF (optional)</label><input type="text" name="${role}_vcf_sample" placeholder="auto-detect"></div>
+  </div>`;
+}
+
+function wireDrop(drop) {
+  const inp = drop.querySelector("input[type=file]");
+  const show = () => {
+    const f = inp.files[0];
+    drop.classList.toggle("has", !!f);
+    const t = drop.querySelector(".t");
+    if (f) t.textContent = `${f.name} (${(f.size / 1048576).toFixed(1)} MB)`;
+  };
+  inp.addEventListener("change", show);
+  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => { if (e.dataTransfer.files.length) { inp.files = e.dataTransfer.files; show(); } });
+}
+
+function render() {
+  const t = document.querySelector("input[name=case_type]:checked").value;
+  const box = document.getElementById("roleCards");
+  box.className = "grid " + (t === "single" ? "" : t === "trio" ? "g3" : "g2");
+  box.innerHTML = ROLE_SETS[t].map(([r, l]) => roleCard(r, l)).join("");
+  box.querySelectorAll(".drop").forEach(wireDrop);
+
+  // "combined VCF" only means something when there's more than one person - for a
+  // single case it would just be a second, confusing way to upload the same one file
+  const combinedDrop = document.getElementById("combinedDrop");
+  const multiPerson = t !== "single";
+  combinedDrop.classList.toggle("hidden", !multiPerson);
+  if (!multiPerson) combinedDrop.querySelector("input[type=file]").value = "";
+  document.getElementById("samplesSub").textContent = multiPerson
+    ? "GRCh38 VCF (.vcf or .vcf.gz) per person, or one combined multi-sample VCF covering everyone."
+    : "GRCh38 VCF (.vcf or .vcf.gz).";
+
+  document.querySelectorAll(".pheno-only").forEach(el => el.classList.toggle("hidden", t === "couple"));
+  document.querySelectorAll(".couple-only").forEach(el => el.classList.toggle("hidden", t !== "couple"));
+  document.querySelectorAll('textarea[name="clinical_history"]').forEach(el => {
+    const visible = !el.closest(".hidden");
+    el.required = visible;
+    el.disabled = !visible;
+  });
+}
+document.querySelectorAll("input[name=case_type]").forEach(r => r.addEventListener("change", render));
+wireDrop(document.getElementById("combinedDrop"));
+render();
+
+document.getElementById("caseForm").addEventListener("submit", () => {
+  const b = document.getElementById("submitBtn");
+  b.disabled = true; b.innerHTML = '<span class="spinner"></span> Uploading...';
+  document.getElementById("submitNote").textContent = "Uploading VCF files - large exomes can take a minute.";
+});
+</script>
+{% endblock %}

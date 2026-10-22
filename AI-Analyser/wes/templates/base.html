@@ -1,0 +1,38 @@
+{% from "_macros.html" import icon %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}WES AI Analyser{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
+</head>
+<body>
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="logo" href="/">
+      <span class="mark">{{ icon('dna') }}</span>
+      <span><b>Exome AI</b><span>Clinical WES analysis</span></span>
+    </a>
+    <nav class="nav-h">
+      <a href="/" class="{{ 'on' if nav == 'cases' }}">{{ icon('cases') }} Cases</a>
+      <a href="/cases/new" class="{{ 'on' if nav == 'new' }}">{{ icon('plus') }} New case</a>
+      <a href="/system" class="{{ 'on' if nav == 'system' }}">{{ icon('server') }} System status</a>
+    </nav>
+    <div class="topnav-user">
+      <span class="avatar">{{ (user or 'u')[:2] }}</span>
+      <span class="name">{{ user }}</span>
+      {% if show_logout %}<form method="post" action="/logout" class="inline"><button class="ghost sm" title="Sign out">{{ icon('unlock') }}</button></form>{% endif %}
+    </div>
+  </div>
+</header>
+<header class="topbar">
+  <div class="crumbs">{% block crumbs %}<b>Cases</b>{% endblock %}</div>
+</header>
+<div class="page">
+  {% block content %}{% endblock %}
+</div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

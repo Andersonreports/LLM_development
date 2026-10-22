@@ -1,0 +1,955 @@
+#!/usr/bin/env python3
+"""Clinical Variant Reporter — ACMG/AMP 2015 variant classification from VCF.
+
+Classifies germline variants according to the ACMG/AMP 28-criteria evidence
+framework and generates clinical-grade interpretation reports with evidence
+audit trails and ACMG SF v3.2 secondary findings screening.
+
+Usage:
+    python clinical_variant_reporter.py --demo --output /tmp/acmg_demo
+    python clinical_variant_reporter.py --input patient.vcf --output report_dir
+    python clinical_variant_reporter.py --input patient.vcf --genes "BRCA1,BRCA2" --output report_dir
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sys
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+sys.path.insert(0, str(SCRIPT_DIR))
+from acmg_engine import (
+    ACMG_SF_V32_GENES,
+    ClassifiedVariant,
+    VariantEvidence,
+    classify_variant,
+)
+from self_audit import ABSTAIN_LABEL, audit_classified, expected_from_record
+
+DISCLAIMER = (
+    "ClawBio is a research and educational tool. It is not a medical device "
+    "and does not provide clinical diagnoses. Consult a healthcare "
+    "professional before making any medical decisions."
+)
+
+VEP_REST_HOST = "https://rest.ensembl.org"
+VEP_REST_HOST_GRCH37 = "https://grch37.rest.ensembl.org"
+VEP_REST_PATH = "/vep/homo_sapiens/region"
+ENSEMBL_INFO_VARIATION_PATH = "/info/variation/homo_sapiens"
+VEP_REST_URL = VEP_REST_HOST + VEP_REST_PATH
+VEP_BATCH_SIZE = 200
+VEP_RATE_LIMIT_SECONDS = 0.07  # ~15 requests/second
+GNOMAD_VERSION_LABEL = "v4.1"  # info/variation does not list gnomAD; no live source exists
+DEMO_CLINVAR_LABEL = "2025-03-01 release"
+
+
+def _ensembl_rest_host(assembly: str) -> str:
+    """The main Ensembl REST host always serves GRCh38 and silently ignores
+    an ``assembly`` query parameter; GRCh37 data (and its ClinVar/dbSNP/OMIM
+    versions, which the two hosts do not agree on) lives only on the separate
+    grch37.rest.ensembl.org mirror. Both the VEP annotation POST and the
+    data-source version GET must route through this, so a GRCh37 run never
+    certifies data, or a version, that actually came from the GRCh38 host."""
+    return VEP_REST_HOST_GRCH37 if assembly == "GRCh37" else VEP_REST_HOST
+
+
+# ---------------------------------------------------------------------------
+# VCF parsing (lightweight, no pysam dependency)
+# ---------------------------------------------------------------------------
+@dataclass
+class VcfRecord:
+    chrom: str
+    pos: int
+    id: str
+    ref: str
+    alt: str
+    qual: str
+    filt: str
+    info: dict[str, str]
+    genotype: str | None = None
+
+
+def parse_vcf(path: Path) -> list[VcfRecord]:
+    """Parse a VCF file into a list of VcfRecord objects (one per ALT allele)."""
+    records: list[VcfRecord] = []
+    opener = open
+    filepath = str(path)
+
+    if filepath.endswith(".gz"):
+        import gzip
+        opener = gzip.open
+
+    with opener(path, "rt") as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            fields = line.strip().split("\t")
+            if len(fields) < 8:
+                continue
+
+            info: dict[str, str] = {}
+            for item in fields[7].split(";"):
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    info[k] = v
+                else:
+                    info[item] = "true"
+
+            genotype = None
+            if len(fields) >= 10:
+                genotype = fields[9].split(":")[0]
+
+            for alt_allele in fields[4].split(","):
+                records.append(VcfRecord(
+                    chrom=fields[0],
+                    pos=int(fields[1]),
+                    id=fields[2],
+                    ref=fields[3],
+                    alt=alt_allele.strip(),
+                    qual=fields[5],
+                    filt=fields[6],
+                    info=info,
+                    genotype=genotype,
+                ))
+
+    return records
+
+
+# ---------------------------------------------------------------------------
+# Evidence collection — demo mode (pre-cached, offline)
+# ---------------------------------------------------------------------------
+def load_demo_evidence_cache() -> dict[str, dict]:
+    """Load pre-cached evidence for demo variants."""
+    cache_path = SCRIPT_DIR / "example_data" / "demo_evidence_cache.json"
+    with open(cache_path) as fh:
+        return json.load(fh)
+
+
+def build_evidence_from_cache(record: VcfRecord, cache: dict[str, dict]) -> VariantEvidence:
+    """Build VariantEvidence from the pre-cached demo evidence."""
+    key = f"{record.chrom}:{record.pos}:{record.ref}:{record.alt}"
+    cached = cache.get(key, {})
+
+    return VariantEvidence(
+        chrom=record.chrom,
+        pos=record.pos,
+        ref=record.ref,
+        alt=record.alt,
+        rsid=record.id if record.id != "." else "",
+        gene=cached.get("gene", record.info.get("GENE", "")),
+        consequence=cached.get("consequence", ""),
+        impact=cached.get("impact", ""),
+        hgvsc=cached.get("hgvsc", ""),
+        hgvsp=cached.get("hgvsp", ""),
+        transcript=cached.get("transcript", ""),
+        clinvar_significance=cached.get("clinvar_significance", ""),
+        clinvar_review_stars=cached.get("clinvar_review_stars", 0),
+        gnomad_af=cached.get("gnomad_af"),
+        gnomad_af_popmax=cached.get("gnomad_af_popmax"),
+        cadd_phred=cached.get("cadd_phred"),
+        sift_prediction=cached.get("sift_prediction", ""),
+        polyphen_prediction=cached.get("polyphen_prediction", ""),
+        spliceai_max_delta=cached.get("spliceai_max_delta"),
+        is_lof=cached.get("is_lof", False),
+        is_missense=cached.get("is_missense", False),
+        is_synonymous=cached.get("is_synonymous", False),
+        is_inframe_indel=cached.get("is_inframe_indel", False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evidence collection — live mode (VEP REST API)
+# ---------------------------------------------------------------------------
+def _vcf_to_vep_region(record: VcfRecord) -> str:
+    """Convert a VCF record to VEP region format: 'chr start end alleles strand'."""
+    chrom = record.chrom.replace("chr", "")
+    ref, alt = record.ref, record.alt
+
+    if len(ref) == 1 and len(alt) == 1:
+        return f"{chrom} {record.pos} {record.pos} {ref}/{alt} 1"
+
+    if len(ref) > len(alt):
+        start = record.pos + 1
+        end = record.pos + len(ref) - 1
+        deleted = ref[1:]
+        return f"{chrom} {start} {end} {deleted}/- 1"
+
+    if len(alt) > len(ref):
+        start = record.pos + 1
+        end = record.pos
+        inserted = alt[1:]
+        return f"{chrom} {start} {end} -/{inserted} 1"
+
+    return f"{chrom} {record.pos} {record.pos + len(ref) - 1} {ref}/{alt} 1"
+
+
+def _clinvar_significance_for_alt(clin_sig_allele: object, alt: str) -> str:
+    """Return the VEP ClinVar terms asserted for exactly ``alt``.
+
+    ``colocated_variants[].clin_sig`` is a site-level aggregate, so it can
+    combine assertions for different alternate alleles.  VEP's allele-specific
+    string is a semicolon-delimited sequence of ``ALT:terms`` entries.  Its
+    undocumented non-string shapes cannot establish an ALT-to-assertion link,
+    and malformed entries are deliberately treated as absent evidence.
+    """
+    if not isinstance(clin_sig_allele, str) or not clin_sig_allele.strip():
+        return ""
+
+    queried_alt = alt.upper()
+    matching_terms: list[str] = []
+    for entry in clin_sig_allele.split(";"):
+        entry = entry.strip()
+        if entry.count(":") != 1:
+            return ""
+        allele, terms = (part.strip() for part in entry.split(":", 1))
+        if not allele or not terms:
+            return ""
+        if allele.upper() == queried_alt:
+            matching_terms.append(terms)
+
+    # ``&`` is the allele-specific VEP term separator.  The ACMG engine
+    # normalises it alongside ClinVar's other multi-value separators.
+    return "&".join(matching_terms)
+
+
+def _extract_evidence_from_vep(vep_result: dict, record: VcfRecord) -> VariantEvidence:
+    """Extract VariantEvidence fields from a single VEP REST response entry."""
+    most_severe = vep_result.get("most_severe_consequence", "")
+
+    gene = ""
+    consequence = most_severe
+    impact = ""
+    hgvsc = ""
+    hgvsp = ""
+    transcript_id = ""
+
+    for tc in vep_result.get("transcript_consequences", []):
+        if tc.get("consequence_terms") and most_severe in tc["consequence_terms"]:
+            gene = tc.get("gene_symbol", gene)
+            impact = tc.get("impact", impact)
+            hgvsc = tc.get("hgvsc", hgvsc)
+            hgvsp = tc.get("hgvsp", hgvsp)
+            transcript_id = tc.get("transcript_id", transcript_id)
+            break
+
+    if not gene:
+        for tc in vep_result.get("transcript_consequences", []):
+            gene = tc.get("gene_symbol", "")
+            impact = tc.get("impact", "")
+            if gene:
+                break
+
+    clinvar_sig = ""
+    clinvar_stars = 0
+    gnomad_af = None
+    gnomad_af_popmax = None
+
+    for cv in vep_result.get("colocated_variants", []):
+        if not clinvar_sig:
+            # Never fall back to ``clin_sig``: it aggregates all ClinVar
+            # assertions at this coordinate, including other ALT alleles.
+            # The REST response does not provide an independently verifiable
+            # allele-specific review-star field, so live ClinVar rules remain
+            # withheld unless a future API supplies one with the assertion.
+            clinvar_sig = _clinvar_significance_for_alt(
+                cv.get("clin_sig_allele"), record.alt)
+
+        freq_data = cv.get("frequencies", {})
+        if freq_data:
+            for allele_freq in freq_data.values():
+                af_val = allele_freq.get("gnomade", allele_freq.get("gnomad", None))
+                if af_val is not None and (gnomad_af is None or af_val > gnomad_af):
+                    gnomad_af = af_val
+
+    sift = ""
+    polyphen = ""
+    cadd = None
+    for tc in vep_result.get("transcript_consequences", []):
+        if tc.get("sift_prediction") and not sift:
+            sift = tc["sift_prediction"]
+        if tc.get("polyphen_prediction") and not polyphen:
+            polyphen = tc["polyphen_prediction"]
+        if tc.get("cadd_phred") and cadd is None:
+            cadd = tc["cadd_phred"]
+
+    from acmg_engine import (
+        INFRAME_CONSEQUENCES,
+        LOF_CONSEQUENCES,
+        MISSENSE_CONSEQUENCES,
+        SYNONYMOUS_CONSEQUENCES,
+    )
+
+    return VariantEvidence(
+        chrom=record.chrom,
+        pos=record.pos,
+        ref=record.ref,
+        alt=record.alt,
+        rsid=record.id if record.id != "." else vep_result.get("id", ""),
+        gene=gene or record.info.get("GENE", ""),
+        consequence=consequence,
+        impact=impact,
+        hgvsc=hgvsc,
+        hgvsp=hgvsp,
+        transcript=transcript_id,
+        clinvar_significance=clinvar_sig,
+        clinvar_review_stars=clinvar_stars,
+        gnomad_af=gnomad_af,
+        gnomad_af_popmax=gnomad_af_popmax,
+        cadd_phred=cadd,
+        sift_prediction=sift,
+        polyphen_prediction=polyphen,
+        is_lof=consequence in LOF_CONSEQUENCES,
+        is_missense=consequence in MISSENSE_CONSEQUENCES,
+        is_synonymous=consequence in SYNONYMOUS_CONSEQUENCES,
+        is_inframe_indel=consequence in INFRAME_CONSEQUENCES,
+    )
+
+
+def _fetch_ensembl_data_versions(assembly: str = "GRCh38") -> dict[str, str] | None:
+    """Query the live source versions bundled with Ensembl's variation data
+    (ClinVar, dbSNP, OMIM), for the Data Sources report section. gnomAD is not
+    listed by this endpoint and stays a hardcoded constant (GNOMAD_VERSION_LABEL).
+
+    Uses the same assembly-selected host as the VEP annotation call
+    (_ensembl_rest_host) — see that function's docstring for why a GRCh37 run
+    must not hit the GRCh38 host here either.
+    """
+    try:
+        import requests
+        resp = requests.get(
+            _ensembl_rest_host(assembly) + ENSEMBL_INFO_VARIATION_PATH,
+            headers={"Accept": "application/json"},  # GET, not a body: Accept, not Content-Type
+            timeout=10,
+        )
+        resp.raise_for_status()
+        sources = resp.json()
+    except Exception as exc:
+        print(f"WARNING: could not fetch Ensembl data source versions ({exc}).", file=sys.stderr)
+        return None
+
+    versions: dict[str, str] = {}
+    name_to_key = {"ClinVar": "clinvar", "dbSNP": "dbsnp", "OMIM": "omim"}
+    for src in sources if isinstance(sources, list) else []:
+        key = name_to_key.get(src.get("name", ""))
+        if key and src.get("version"):
+            versions[key] = src["version"]
+    return versions or None
+
+
+def annotate_variants_vep(
+    records: list[VcfRecord],
+    assembly: str = "GRCh38",
+) -> tuple[list[VariantEvidence], dict[str, str] | None]:
+    """Annotate variants via Ensembl VEP REST API.
+
+    Returns (evidence_list, source_versions). A VEP batch failure aborts the
+    run rather than returning placeholder evidence that can be misclassified.
+    source_versions still distinguishes successful annotation states:
+      - None: no annotation was attempted, so a report must not make any
+        data-source claim at all.
+      - {} (empty dict): annotation succeeded, but the separate Ensembl
+        data-source version lookup itself failed. Annotation is real; the
+        version check is what's missing.
+      - a non-empty dict: the lookup succeeded (individual sources may still
+        be absent from Ensembl's response).
+
+    The POST is routed through the assembly-selected host (_ensembl_rest_host)
+    so a GRCh37 run does not silently get GRCh38 annotations from the main host.
+    """
+    try:
+        import requests
+    except ImportError:
+        print("ERROR: 'requests' package required for live mode. Install: pip install requests", file=sys.stderr)
+        sys.exit(1)
+
+    evidence_list: list[VariantEvidence] = []
+    any_batch_succeeded = False
+    vep_url = _ensembl_rest_host(assembly) + VEP_REST_PATH
+
+    for batch_start in range(0, len(records), VEP_BATCH_SIZE):
+        batch = records[batch_start:batch_start + VEP_BATCH_SIZE]
+        regions = [_vcf_to_vep_region(r) for r in batch]
+
+        try:
+            resp = requests.post(
+                vep_url,
+                json={"variants": regions},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                params={"assembly": assembly, "transcript_version": 1},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            vep_results = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"VEP annotation failed for a batch of {len(batch)} variants "
+                f"(batch starting at index {batch_start})."
+            ) from exc
+
+        if not isinstance(vep_results, list) or not all(isinstance(vr, dict) for vr in vep_results):
+            raise RuntimeError(
+                f"Malformed VEP response for a batch of {len(batch)} variants "
+                f"(batch starting at index {batch_start})."
+            )
+
+        any_batch_succeeded = True
+        result_map: dict[str, dict] = {}
+        for vr in vep_results:
+            loc = vr.get("input", "")
+            result_map[loc] = vr
+
+        for rec, region in zip(batch, regions):
+            vep_result = result_map.get(region, {})
+            if vep_result:
+                evidence_list.append(_extract_evidence_from_vep(vep_result, rec))
+            else:
+                evidence_list.append(VariantEvidence(
+                    chrom=rec.chrom, pos=rec.pos, ref=rec.ref, alt=rec.alt,
+                    gene=rec.info.get("GENE", ""),
+                ))
+
+        time.sleep(VEP_RATE_LIMIT_SECONDS)
+
+    if not any_batch_succeeded:
+        source_versions = None
+    else:
+        fetched = _fetch_ensembl_data_versions(assembly=assembly)
+        # Annotation succeeded even if this lookup didn't: {} (not None) marks
+        # "tried and failed" so the report can't confuse this with "nothing
+        # was annotated" (see _data_source_versions_for_report).
+        source_versions = fetched if fetched is not None else {}
+    return evidence_list, source_versions
+
+
+# ---------------------------------------------------------------------------
+# Classification pipeline
+# ---------------------------------------------------------------------------
+def run_classification(
+    records: list[VcfRecord],
+    demo: bool = False,
+    gene_filter: set[str] | None = None,
+    assembly: str = "GRCh38",
+) -> tuple[list[ClassifiedVariant], dict[str, str] | None]:
+    """Run the full ACMG classification pipeline on VCF records.
+
+    Returns (classified, source_versions); source_versions is always None in
+    demo mode and is the Ensembl data-source versions captured at annotation
+    time in live mode (None if annotation never succeeded).
+    """
+    if demo:
+        cache = load_demo_evidence_cache()
+        evidence_list = [build_evidence_from_cache(r, cache) for r in records]
+        source_versions = None
+    else:
+        evidence_list, source_versions = annotate_variants_vep(records, assembly=assembly)
+
+    if gene_filter:
+        evidence_list = [e for e in evidence_list if e.gene in gene_filter]
+
+    # Fail-closed self-audit: hard-abstain any variant that violates a deterministic
+    # invariant (wrong-variant identity, contradictory evidence, missing provenance)
+    # rather than emit a confident, possibly-wrong classification.
+    record_by_key = {f"{r.chrom}:{r.pos}:{r.ref}:{r.alt}": r for r in records}
+    classified: list[ClassifiedVariant] = []
+    for ev in evidence_list:
+        cv = classify_variant(ev)
+        rec = record_by_key.get(f"{ev.chrom}:{ev.pos}:{ev.ref}:{ev.alt}")
+        audit = audit_classified(cv, expected_from_record(rec))
+        cv.audit_violations = audit.violations
+        if not audit.passed:
+            cv.classification = ABSTAIN_LABEL
+        classified.append(cv)
+    return classified, source_versions
+
+
+# ---------------------------------------------------------------------------
+# Report generation
+# ---------------------------------------------------------------------------
+CLASS_ORDER = ["Pathogenic", "Likely Pathogenic", "Uncertain Significance", "Likely Benign", "Benign"]
+CLASS_SHORT = {"Pathogenic": "P", "Likely Pathogenic": "LP", "Uncertain Significance": "VUS", "Likely Benign": "LB", "Benign": "B"}
+
+
+def _data_source_versions_for_report(
+    demo: bool, source_versions: dict[str, str] | None,
+) -> dict[str, str]:
+    """Prose labels for the Markdown Data Sources table. Never performs a
+    network call: source_versions must already be captured
+    (annotate_variants_vep, at annotation time), and is one of three states
+    that each get their own label rather than collapsing into one sentence:
+
+      - None: no VEP batch succeeded this run, so no claim can be made about
+        any source, including gnomAD's hardcoded constant.
+      - {} (empty dict): at least one VEP batch succeeded, but the separate
+        Ensembl data-source version lookup itself failed (network/HTTP/JSON
+        error) — annotation is real, only the version check is missing.
+      - a non-empty dict: the lookup succeeded; an individual source can
+        still be absent from Ensembl's response (e.g. no ClinVar entry),
+        reported per-source rather than as a run-wide failure.
+
+    See _structured_data_source_versions for the machine-readable form used
+    by result.json / database_versions.json.
+    """
+    if demo:
+        return {
+            "ClinVar": f"{DEMO_CLINVAR_LABEL} (demo cache)",
+            "gnomAD": f"{GNOMAD_VERSION_LABEL} (demo cache)",
+        }
+
+    gnomad_label = f"{GNOMAD_VERSION_LABEL} (hardcoded; Ensembl serves no gnomAD version endpoint)"
+
+    if source_versions is None:
+        note = "unavailable (no variant was successfully annotated this run)"
+        return {"ClinVar": note, "gnomAD": note}
+
+    if not source_versions:
+        return {
+            "ClinVar": "unavailable (annotation succeeded, but the Ensembl version lookup failed)",
+            "gnomAD": gnomad_label,
+        }
+
+    clinvar_v = source_versions.get("clinvar")
+    clinvar_label = (
+        f"{clinvar_v} (via Ensembl /info/variation/homo_sapiens)" if clinvar_v
+        else "unavailable (Ensembl did not report a ClinVar version this run)"
+    )
+    return {
+        "ClinVar": clinvar_label,
+        "gnomAD": gnomad_label,
+    }
+
+
+def _structured_data_source_versions(
+    demo: bool, source_versions: dict[str, str] | None,
+) -> dict[str, str | None]:
+    """Machine-readable counterpart to _data_source_versions_for_report, for
+    result.json / database_versions.json: real values or null, never prose,
+    so the audit trail can be parsed rather than grepped (review on #303/#327:
+    'data_source_versions currently receives English prose ... emit the
+    structured form there and keep prose for the Markdown table')."""
+    if demo:
+        return {
+            "clinvar": DEMO_CLINVAR_LABEL,
+            "dbsnp": None,
+            "omim": None,
+            "gnomad": GNOMAD_VERSION_LABEL,
+        }
+    # source_versions is None only when no VEP batch succeeded this run, i.e.
+    # nothing was annotated -- report.md's prose form says as much for gnomAD
+    # too (_data_source_versions_for_report's `note` branch), so the
+    # structured form must not assert the hardcoded gnomAD constant here
+    # either (review on #327, blocking item 2: the two artefacts disagreed).
+    if source_versions is None:
+        return {"clinvar": None, "dbsnp": None, "omim": None, "gnomad": None}
+    sv = source_versions
+    return {
+        "clinvar": sv.get("clinvar"),
+        "dbsnp": sv.get("dbsnp"),
+        "omim": sv.get("omim"),
+        "gnomad": GNOMAD_VERSION_LABEL,
+    }
+
+
+def generate_report(
+    classified: list[ClassifiedVariant],
+    output_dir: Path,
+    demo: bool = False,
+    assembly: str = "GRCh38",
+    input_path: str = "demo",
+    source_versions: dict[str, str] | None = None,
+) -> None:
+    """Generate all output files: report.md, result.json, tables/, figures/, reproducibility/.
+
+    source_versions is the Ensembl data-source versions captured at annotation
+    time (see annotate_variants_vep / run_classification); this function makes
+    no network call of its own, so regenerating a report from stored
+    ClassifiedVariant objects without passing source_versions again correctly
+    shows "unavailable" rather than re-fetching today's release for an old run.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "tables").mkdir(exist_ok=True)
+    (output_dir / "figures").mkdir(exist_ok=True)
+    (output_dir / "reproducibility").mkdir(exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    counts = {c: 0 for c in CLASS_ORDER}
+    for cv in classified:
+        counts[cv.classification] = counts.get(cv.classification, 0) + 1
+
+    sf_variants = [cv for cv in classified if cv.is_secondary_finding]
+    data_sources = _data_source_versions_for_report(demo, source_versions)
+    structured_versions = _structured_data_source_versions(demo, source_versions)
+
+    _write_markdown_report(classified, counts, sf_variants, output_dir, timestamp, demo, assembly, input_path, data_sources)
+    _write_classification_table(classified, output_dir)
+    _write_secondary_findings_table(sf_variants, output_dir)
+    _write_result_json(classified, counts, sf_variants, output_dir, timestamp, demo, assembly, structured_versions)
+    _write_classification_figure(counts, output_dir)
+    _write_reproducibility(output_dir, demo, assembly, input_path, timestamp, structured_versions)
+
+
+def _write_markdown_report(
+    classified: list[ClassifiedVariant],
+    counts: dict[str, int],
+    sf_variants: list[ClassifiedVariant],
+    output_dir: Path,
+    timestamp: str,
+    demo: bool,
+    assembly: str,
+    input_path: str,
+    data_sources: dict[str, str],
+) -> None:
+    lines: list[str] = []
+    lines.append("# Clinical Variant Report — ACMG/AMP Classification")
+    lines.append("")
+    lines.append(f"**Generated**: {timestamp}")
+    lines.append(f"**Input**: {input_path}")
+    lines.append(f"**Assembly**: {assembly}")
+    lines.append(f"**Total variants classified**: {len(classified)}")
+    lines.append(f"**Mode**: {'Demo (pre-cached evidence)' if demo else 'Live (VEP REST API)'}")
+    lines.append("")
+
+    lines.append("## Classification Summary")
+    lines.append("")
+    lines.append("| Classification | Count |")
+    lines.append("|----------------|-------|")
+    for cls in CLASS_ORDER:
+        lines.append(f"| {cls} | {counts.get(cls, 0)} |")
+    lines.append("")
+
+    actionable = [cv for cv in classified if cv.classification in ("Pathogenic", "Likely Pathogenic")]
+    if actionable:
+        lines.append("## Actionable Variants (Pathogenic / Likely Pathogenic)")
+        lines.append("")
+        for cv in actionable:
+            ev = cv.evidence
+            sf_tag = " **[SF]**" if cv.is_secondary_finding else ""
+            lines.append(f"### {ev.gene} — {ev.hgvsp or ev.hgvsc or f'{ev.ref}>{ev.alt}'}{sf_tag}")
+            lines.append("")
+            lines.append(f"- **Classification**: {cv.classification}")
+            lines.append(f"- **Position**: {ev.chrom}:{ev.pos}")
+            lines.append(f"- **rsID**: {ev.rsid or 'N/A'}")
+            lines.append(f"- **Transcript**: {ev.transcript or 'N/A'}")
+            lines.append(f"- **Consequence**: {ev.consequence}")
+            lines.append(f"- **ClinVar**: {ev.clinvar_significance_text or 'N/A'} (stars: {ev.clinvar_review_stars})")
+            lines.append(f"- **gnomAD AF**: {ev.gnomad_af if ev.gnomad_af is not None else 'N/A'}")
+            lines.append(f"- **Evidence codes**: {cv.evidence_summary}")
+            lines.append("")
+            lines.append("| Criterion | Triggered | Strength | Direction | Source |")
+            lines.append("|-----------|-----------|----------|-----------|--------|")
+            for c in cv.criteria:
+                tick = "Yes" if c.triggered else "No"
+                lines.append(f"| {c.code} | {tick} | {c.strength} | {c.direction} | {c.source} |")
+            lines.append("")
+
+    vus_list = [cv for cv in classified if cv.classification == "Uncertain Significance"]
+    if vus_list:
+        lines.append("## Variants of Uncertain Significance (VUS)")
+        lines.append("")
+        lines.append("| Gene | Variant | Transcript | Position | gnomAD AF | Evidence Codes | SF Gene |")
+        lines.append("|------|---------|------------|----------|-----------|----------------|---------|")
+        for cv in vus_list:
+            ev = cv.evidence
+            af = f"{ev.gnomad_af:.6f}" if ev.gnomad_af is not None else "N/A"
+            sf = "Yes" if cv.is_secondary_finding else "No"
+            lines.append(f"| {ev.gene} | {ev.hgvsp or ev.hgvsc or f'{ev.ref}>{ev.alt}'} | {ev.transcript or 'N/A'} | {ev.chrom}:{ev.pos} | {af} | {cv.evidence_summary} | {sf} |")
+        lines.append("")
+
+    benign_list = [cv for cv in classified if cv.classification in ("Likely Benign", "Benign")]
+    if benign_list:
+        lines.append("## Benign / Likely Benign Variants")
+        lines.append("")
+        lines.append("| Gene | Variant | Classification | gnomAD AF | Evidence Codes |")
+        lines.append("|------|---------|----------------|-----------|----------------|")
+        for cv in benign_list:
+            ev = cv.evidence
+            af = f"{ev.gnomad_af:.4f}" if ev.gnomad_af is not None else "N/A"
+            lines.append(f"| {ev.gene} | {ev.hgvsp or ev.hgvsc or f'{ev.ref}>{ev.alt}'} | {cv.classification} | {af} | {cv.evidence_summary} |")
+        lines.append("")
+
+    if sf_variants:
+        lines.append("## ACMG SF v3.2 Secondary Findings Screening")
+        lines.append("")
+        lines.append(f"**{len(sf_variants)}** variant(s) found in ACMG SF v3.2 genes ({len(ACMG_SF_V32_GENES)} genes screened).")
+        lines.append("")
+        lines.append("| Gene | Variant | Classification | Evidence Codes |")
+        lines.append("|------|---------|----------------|----------------|")
+        for cv in sf_variants:
+            ev = cv.evidence
+            lines.append(f"| {ev.gene} | {ev.hgvsp or ev.hgvsc or f'{ev.ref}>{ev.alt}'} | {cv.classification} | {cv.evidence_summary} |")
+        lines.append("")
+
+    lines.append("## Methodology")
+    lines.append("")
+    lines.append("Variants were classified according to the ACMG/AMP 2015 standards and guidelines ")
+    lines.append("(Richards et al., *Genet Med* 2015; PMID 25741868). Evidence was collected from Ensembl VEP ")
+    lines.append("(consequence annotation, ClinVar, gnomAD colocated frequencies, SIFT, PolyPhen). ")
+    lines.append("The ACMG combining rules were applied to assign one of five classifications: ")
+    lines.append("Pathogenic, Likely Pathogenic, Uncertain Significance, Likely Benign, or Benign. ")
+    lines.append("Secondary findings were screened against ACMG SF v3.2 (Miller et al., 2023; 81 genes).")
+    lines.append("")
+    lines.append("### Criteria Not Automatically Assessed")
+    lines.append("")
+    lines.append("The following ACMG criteria require additional data (family studies, functional assays, etc.) ")
+    lines.append("and were not evaluated in this automated run:")
+    lines.append("")
+    lines.append("- **PS2/PM6**: De novo status (requires parental samples)")
+    lines.append("- **PS3/BS3**: Functional studies (requires experimental data)")
+    lines.append("- **PS4**: Case-control prevalence (requires cohort data)")
+    lines.append("- **PM3**: In trans with pathogenic variant (requires phased data)")
+    lines.append("- **PP1/BS4**: Family segregation (requires pedigree)")
+    lines.append("- **PP2/BP1**: Gene-level missense constraint (planned)")
+    lines.append("- **PP4**: Phenotype specificity (requires HPO terms)")
+    lines.append("- **BP2/BP3/BP5/BS2**: Require additional contextual data")
+    lines.append("")
+
+    lines.append("## Data Sources")
+    lines.append("")
+    lines.append("| Source | Version / Release |")
+    lines.append("|--------|-------------------|")
+    lines.append(f"| ClinVar | {data_sources['ClinVar']} |")
+    lines.append(f"| gnomAD | {data_sources['gnomAD']} |")
+    lines.append("| Ensembl VEP | REST API, assembly %s |" % assembly)
+    lines.append("| ACMG SF list | v3.2 (Miller et al., 2023; 81 genes) |")
+    lines.append("")
+
+    lines.append("## Limitations")
+    lines.append("")
+    lines.append("- Not all 28 ACMG/AMP criteria can be evaluated automatically; manual review is recommended for actionable variants")
+    lines.append("- In silico predictor scores may not be available for all variants")
+    lines.append("- ClinVar assertions reflect submitter interpretations and may change over time")
+    lines.append("- gnomAD does not include all populations equally; AF may underestimate prevalence in underrepresented groups")
+    lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append(f"*{DISCLAIMER}*")
+    lines.append("")
+
+    (output_dir / "report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_classification_table(classified: list[ClassifiedVariant], output_dir: Path) -> None:
+    table_path = output_dir / "tables" / "acmg_classifications.tsv"
+    with open(table_path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow([
+            "chrom", "pos", "ref", "alt", "rsid", "gene", "consequence",
+            "clinvar_significance", "clinvar_stars", "gnomad_af",
+            "cadd_phred", "acmg_classification", "acmg_short",
+            "evidence_codes", "is_secondary_finding",
+        ])
+        for cv in classified:
+            ev = cv.evidence
+            writer.writerow([
+                ev.chrom, ev.pos, ev.ref, ev.alt, ev.rsid, ev.gene,
+                ev.consequence, ev.clinvar_significance_text, ev.clinvar_review_stars,
+                ev.gnomad_af if ev.gnomad_af is not None else "",
+                ev.cadd_phred if ev.cadd_phred is not None else "",
+                cv.classification, CLASS_SHORT.get(cv.classification, "?"),
+                cv.evidence_summary, cv.is_secondary_finding,
+            ])
+
+
+def _write_secondary_findings_table(sf_variants: list[ClassifiedVariant], output_dir: Path) -> None:
+    table_path = output_dir / "tables" / "secondary_findings.tsv"
+    with open(table_path, "w", newline="") as fh:
+        writer = csv.writer(fh, delimiter="\t")
+        writer.writerow([
+            "gene", "chrom", "pos", "ref", "alt", "consequence",
+            "acmg_classification", "evidence_codes",
+        ])
+        for cv in sf_variants:
+            ev = cv.evidence
+            writer.writerow([
+                ev.gene, ev.chrom, ev.pos, ev.ref, ev.alt,
+                ev.consequence, cv.classification, cv.evidence_summary,
+            ])
+
+
+def _write_result_json(
+    classified: list[ClassifiedVariant],
+    counts: dict[str, int],
+    sf_variants: list[ClassifiedVariant],
+    output_dir: Path,
+    timestamp: str,
+    demo: bool,
+    assembly: str,
+    data_source_versions: dict[str, str | None],
+) -> None:
+    result = {
+        "tool": "ClawBio Clinical Variant Reporter",
+        "version": "0.1.0",
+        "framework": "ACMG/AMP 2015 (Richards et al., PMID 25741868)",
+        "sf_list": "ACMG SF v3.2 (Miller et al., 2023)",
+        "assembly": assembly,
+        "timestamp": timestamp,
+        "mode": "demo" if demo else "live",
+        "data_source_versions": data_source_versions,
+        "total_variants": len(classified),
+        "classification_counts": counts,
+        "secondary_findings_count": len(sf_variants),
+        "variants": [
+            {
+                "chrom": cv.evidence.chrom,
+                "pos": cv.evidence.pos,
+                "ref": cv.evidence.ref,
+                "alt": cv.evidence.alt,
+                "rsid": cv.evidence.rsid,
+                "gene": cv.evidence.gene,
+                "consequence": cv.evidence.consequence,
+                "classification": cv.classification,
+                "abstained": cv.classification == ABSTAIN_LABEL,
+                "audit_violations": [
+                    {"code": v.code, "detail": v.detail}
+                    for v in getattr(cv, "audit_violations", [])
+                ],
+                "is_secondary_finding": cv.is_secondary_finding,
+                "triggered_criteria": cv.triggered_codes,
+                "evidence_summary": cv.evidence_summary,
+            }
+            for cv in classified
+        ],
+        "disclaimer": DISCLAIMER,
+    }
+    (output_dir / "result.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+
+
+def _write_classification_figure(counts: dict[str, int], output_dir: Path) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        labels = list(CLASS_SHORT.values())
+        values = [counts.get(c, 0) for c in CLASS_ORDER]
+        colours = ["#d32f2f", "#ff9800", "#9e9e9e", "#4caf50", "#2196f3"]
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        bars = ax.bar(labels, values, color=colours, edgecolor="white", linewidth=0.8)
+        ax.set_ylabel("Variant count")
+        ax.set_title("ACMG Classification Summary")
+        ax.set_ylim(0, max(values) + 2 if values else 5)
+
+        for bar, val in zip(bars, values):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
+                        str(val), ha="center", va="bottom", fontweight="bold")
+
+        fig.tight_layout()
+        fig.savefig(output_dir / "figures" / "classification_summary.png", dpi=150)
+        plt.close(fig)
+    except ImportError:
+        pass
+
+
+def _write_reproducibility(
+    output_dir: Path,
+    demo: bool,
+    assembly: str,
+    input_path: str,
+    timestamp: str,
+    data_source_versions: dict[str, str | None],
+) -> None:
+    cmd = f"python {Path(__file__).name}"
+    if demo:
+        cmd += " --demo"
+    else:
+        cmd += f" --input {input_path}"
+    cmd += f" --output {output_dir} --assembly {assembly}"
+    (output_dir / "reproducibility" / "commands.sh").write_text(
+        f"#!/usr/bin/env bash\n# Reproducibility command — generated {timestamp}\n{cmd}\n",
+        encoding="utf-8",
+    )
+
+    db_versions = {
+        "acmg_framework": "Richards et al. 2015 (PMID 25741868)",
+        "sf_list": "ACMG SF v3.2 (Miller et al. 2023)",
+        "sf_gene_count": len(ACMG_SF_V32_GENES),
+        "annotation_backend": "demo_cache" if demo else f"Ensembl VEP REST ({assembly})",
+        "data_source_versions": data_source_versions,
+        "generated": timestamp,
+    }
+    (output_dir / "reproducibility" / "database_versions.json").write_text(
+        json.dumps(db_versions, indent=2), encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Clinical Variant Reporter — ACMG/AMP 2015 classification",
+    )
+    parser.add_argument("--input", type=str, help="Input VCF/BCF file path")
+    parser.add_argument("--output", type=str, help="Output directory for reports")
+    parser.add_argument("--demo", action="store_true", help="Run with built-in GIAB demo panel")
+    parser.add_argument("--genes", type=str, help="Comma-separated gene list to filter (e.g. BRCA1,BRCA2)")
+    parser.add_argument("--assembly", type=str, default="GRCh38", choices=["GRCh37", "GRCh38"])
+
+    args = parser.parse_args()
+
+    if not args.demo and not args.input:
+        parser.error("Provide --input <vcf> or --demo")
+    if not args.output:
+        parser.error("Provide --output <directory>")
+
+    output_dir = Path(args.output)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        print(f"WARNING: Output directory '{output_dir}' is not empty — files may be overwritten.", file=sys.stderr)
+
+    if args.demo:
+        vcf_path = SCRIPT_DIR / "example_data" / "giab_acmg_panel.vcf"
+        input_label = str(vcf_path)
+    else:
+        vcf_path = Path(args.input)
+        input_label = str(vcf_path)
+
+    if not vcf_path.exists():
+        print(f"ERROR: Input file not found: {vcf_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[CVR] Parsing VCF: {vcf_path}")
+    records = parse_vcf(vcf_path)
+    print(f"[CVR] Found {len(records)} variant record(s)")
+
+    gene_filter = None
+    if args.genes:
+        gene_filter = {g.strip() for g in args.genes.split(",")}
+        print(f"[CVR] Filtering to genes: {', '.join(sorted(gene_filter))}")
+
+    print(f"[CVR] Running ACMG classification ({'demo mode' if args.demo else 'live mode'})...")
+    classified, source_versions = run_classification(
+        records, demo=args.demo, gene_filter=gene_filter, assembly=args.assembly,
+    )
+
+    print(f"[CVR] Generating report in: {output_dir}")
+    generate_report(
+        classified, output_dir, demo=args.demo, assembly=args.assembly,
+        input_path=input_label, source_versions=source_versions,
+    )
+
+    counts = {}
+    for cv in classified:
+        counts[cv.classification] = counts.get(cv.classification, 0) + 1
+    sf_count = sum(1 for cv in classified if cv.is_secondary_finding)
+
+    print(f"[CVR] Classification complete:")
+    for cls in CLASS_ORDER:
+        print(f"       {cls}: {counts.get(cls, 0)}")
+    print(f"       Secondary findings (SF v3.2): {sf_count}")
+    print(f"[CVR] Report written to: {output_dir / 'report.md'}")
+
+
+if __name__ == "__main__":
+    main()

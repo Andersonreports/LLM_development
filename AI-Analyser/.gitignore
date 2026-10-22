@@ -1,0 +1,16 @@
+.venv/
+tools/
+resources/
+data/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+
+# real patient reports / PHI that may land in the project root during review
+no patho template.pdf
+*_template.pdf
+
+# large reference data bundled with exome_Scripts (not source code; re-download instead)
+exome_Scripts/reference/*.vcf.gz
+exome_Scripts/reference/*.vcf.gz.tbi

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Error - Exome AI{% endblock %}
+{% block crumbs %}<b>Error {{ code }}</b>{% endblock %}
+{% block content %}
+<div class="card card-pad" style="max-width:720px">
+  <h2>Something needs attention</h2>
+  <div class="err">{{ detail }}</div>
+  <div class="actions" style="margin-top:14px"><a class="btn ghost" href="javascript:history.back()">&larr; Go back</a><a class="btn ghost" href="/">All cases</a></div>
+</div>
+{% endblock %}

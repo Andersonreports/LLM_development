@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% block title %}System status - Exome AI{% endblock %}
+{% block crumbs %}<b>System status</b>{% endblock %}
+{% block content %}
+{% set labels = {'bcftools': 'Variant file processor', 'tabix': 'Variant file indexer', 'vep': 'Variant annotation engine', 'vep_cache': 'Annotation reference cache', 'fasta': 'Reference genome', 'clinvar': 'Clinical variant database', 'alphamissense': 'Missense impact predictor', 'revel': 'Missense impact predictor (optional)', 'spliceai': 'Splice impact predictor (optional)'} %}
+<div class="page-head"><div><h1>System status</h1><p>Tools, annotation resources and analysis settings used by the pipeline.</p></div></div>
+<div class="grid g2">
+  <div class="card">
+    <div class="card-head"><h2>Tools &amp; annotation resources</h2></div>
+    <div class="card-body" style="padding-top:6px;padding-bottom:6px">
+      {% for k, v in tools.items() %}
+      <div class="sys-row"><span>{{ labels.get(k, k) }}</span>
+        {% if v %}<span class="flag flag-NEGATIVE">AVAILABLE</span>{% elif k in ('revel', 'spliceai') %}<span class="flag" style="color:var(--muted);border-color:var(--line)">NOT INSTALLED</span>{% else %}<span class="flag flag-POSITIVE">MISSING</span>{% endif %}</div>
+      {% endfor %}
+      <div class="sys-row"><span>AI assistant</span>
+        {% if ai %}<span class="flag flag-NEGATIVE">CONNECTED</span>{% else %}<span class="flag flag-INCONCLUSIVE">NOT CONFIGURED</span>{% endif %}</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Knowledge base &amp; thresholds</h2></div>
+    <div class="card-body">
+      <div class="kv">
+        <div>Genes with annotations</div><div>{{ '{:,}'.format(genes) }}</div>
+        <div>HPO terms</div><div>{{ '{:,}'.format(hpo_terms) }}</div>
+        <div>Capture targets</div><div class="small">{{ settings.targets_bed.name if settings.targets_bed and settings.targets_bed.exists() else 'none' }} (&plusmn;{{ settings.targets_padding }} bp)</div>
+        <div>Max AF dominant / recessive</div><div>{{ settings.af_dominant }} / {{ settings.af_recessive }}</div>
+        <div>Min DP / GQ / allele balance</div><div>{{ settings.min_dp }} / {{ settings.min_gq }} / {{ settings.min_ab_het }}</div>
+        <div>AI candidates per case</div><div>{{ settings.ai_max_candidates }}</div>
+        <div>AI effort</div><div>{{ settings.ai_effort }}</div>
+      </div>
+      {% if kb_warnings %}<div class="divider"></div>{% for w in kb_warnings %}<div class="warn">{{ w }}</div>{% endfor %}{% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

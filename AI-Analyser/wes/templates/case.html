@@ -1,0 +1,256 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, status_pill, type_chip %}
+{% block title %}{{ case.accession }} - Exome AI{% endblock %}
+{% block crumbs %}<a href="/">Cases</a> / <b>{{ case.accession }}</b>{% endblock %}
+{% block content %}
+{% set p = case.proband %}
+{% set running = case.status in ('processing', 'queued') %}
+{% set flag = case.final_flag or (case.review or {}).get('flag') or case.ai_flag or case.rule_flag %}
+{% set finalizing = case.status == 'review' %}
+
+<div class="card" style="margin-bottom:16px">
+  <div class="case-head">
+    <div>
+      <div class="actions" style="gap:10px">
+        <span class="acc">{{ case.accession }}</span>
+        {{ type_chip(case.case_type) }}
+        <span id="statusPill">{{ status_pill(case.status) }}</span>
+      </div>
+      <div class="meta">
+        {% if case.case_type == 'couple' %}
+          <span>{{ icon('user') }}{{ case.samples|map(attribute='name')|join(' & ') }}</span>
+        {% elif p %}
+          <span>{{ icon('user') }}<b>{{ p.name }}</b>{% if p.sex %}&nbsp;&middot; {{ (p.sex or '')|capitalize }}{% endif %}</span>
+        {% endif %}
+        <span>{{ icon('calendar') }}{{ case.created_at|local }}</span>
+      </div>
+    </div>
+    <div class="actions">
+      {% if case.review %}
+      <a class="btn ghost" href="/cases/{{ case.id }}/report" target="_blank">{{ icon('eye') }} {{ 'View report' if case.status == 'approved' else 'Preview' }}</a>
+      <a class="btn ghost" href="/cases/{{ case.id }}/report.pdf">{{ icon('download') }} PDF</a>
+      {% endif %}
+      {% if case.status == 'review' and case.results %}
+      <form class="inline" method="post" action="/cases/{{ case.id }}/rerun-ai" onsubmit="return confirm('Re-run AI interpretation? Reviewer edits will be replaced.')"><button class="ghost" {% if not ai_available %}disabled title="AI assistant not configured"{% endif %}>{{ icon('sparkle') }} Re-run AI</button></form>
+      {% endif %}
+      {% if case.status not in ('processing', 'queued', 'approved', 'rejected', 'needs_mapping') %}
+      <form class="inline" method="post" action="/cases/{{ case.id }}/run" onsubmit="return confirm('Re-run the full analysis? Reviewer edits will be replaced.')"><button class="ghost">{{ icon('play') }} {{ 'Retry' if case.status == 'failed' else 'Re-analyse' }}</button></form>
+      {% endif %}
+      {% if case.status in ('approved', 'rejected') %}
+      <form class="inline" method="post" action="/cases/{{ case.id }}/reopen" onsubmit="return confirm('Reopen this case to make changes?')"><button class="ghost">{{ icon('unlock') }} Reopen</button></form>
+      {% elif not running %}
+      <form class="inline" method="post" action="/cases/{{ case.id }}/delete" onsubmit="return confirm('Delete this case and its files?')"><button class="danger" title="Delete case">{{ icon('trash') }}</button></form>
+      {% endif %}
+    </div>
+  </div>
+  {# the detailed vertical pipeline list below already shows this while running/failed -
+     showing both here is pure duplication #}
+  <div class="progress {{ 'hidden' if running or case.status == 'failed' }}" id="stepper"></div>
+</div>
+
+{% if case.status == 'needs_mapping' %}
+<div class="card card-pad" style="margin-bottom:16px">
+  <h2>Assign VCF sample columns</h2>
+  <p class="small muted" style="margin-top:-6px">The VCF contains several samples. Choose which column belongs to each person.</p>
+  <form method="post" action="/cases/{{ case.id }}/mapping" class="grid g4">
+    {% for role, cols in mapping.items() %}
+    <div><label>{{ role|capitalize }}</label><select name="{{ role }}">{% for c in cols %}<option {% if case.sample(role).vcf_sample == c %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></div>
+    {% endfor %}
+    <div style="align-self:end"><button>{{ icon('play') }} Save &amp; start</button></div>
+  </form>
+</div>
+
+{% elif running or case.status == 'failed' %}
+{# ---------------- focused progress view: nothing competes for attention ---------------- #}
+{% if case.status == 'failed' %}
+<div class="process-focus">
+  <div class="err" style="text-align:left"><b>Analysis failed.</b> {{ case.error }}</div>
+</div>
+{% else %}
+<div class="process-focus">
+  <div class="pulse-ico"><span class="ring"></span><span class="ring r2"></span>{{ icon('dna') }}</div>
+  <h2 style="margin:16px 0 2px" id="currentStepLabel">Analysing&hellip;</h2>
+  <p>This page updates itself &mdash; a full exome usually takes a few minutes. You can close this tab and come back.</p>
+</div>
+{% endif %}
+<div class="card" style="margin-top:18px">
+  <div class="card-head"><h2>Analysis pipeline</h2><span class="small muted" id="pipeElapsed"></span></div>
+  <div class="card-body" id="pipeline"></div>
+</div>
+<div class="card" style="margin-top:16px">
+  <div class="side-section"><h4>Activity</h4><div class="log" id="events"></div></div>
+</div>
+
+{% else %}
+{# ---------------- review / approved / rejected: one tab bar drives the whole page, no side rail ---------------- #}
+<div class="card" id="tabCard">
+  <div class="tabs" id="tabs">
+    <button data-tab="overview" class="on">Overview</button>
+    <button data-tab="patient">{{ 'Partners' if case.case_type == 'couple' else 'Patient & phenotype' }}</button>
+    <button data-tab="candidates">All variants <span class="count" id="nCand"></span></button>
+    <button data-tab="couple" class="couple-only">Carrier screening</button>
+    <button data-tab="secondary">Secondary &amp; carrier</button>
+    <button data-tab="qc">Quality control</button>
+    <button data-tab="ai">AI notes</button>
+    <button data-tab="activity">Activity</button>
+  </div>
+
+  <div class="pane" data-pane="overview">
+    <div class="stack">
+      {% if flag and case.review %}
+      <div class="result {{ flag }}">
+        <div class="ico">{{ icon('alert') if flag == 'POSITIVE' else icon('help') if flag == 'INCONCLUSIVE' else icon('check-circle') if flag == 'NEGATIVE' else icon('dna') }}</div>
+        <div>
+          <div class="big">{{ {'POSITIVE': 'High-risk couple' if case.case_type == 'couple' else 'Positive', 'INCONCLUSIVE': 'Inconclusive', 'NEGATIVE': 'Negative', 'CARRIER': 'Carrier detected'}[flag] }}</div>
+          <div class="sub">{{ (case.review or {}).get('summary_line') or '' }}</div>
+        </div>
+        <div class="src">{% if case.status == 'approved' %}Approved by {{ case.approved_by }}{% elif case.status == 'rejected' %}Rejected by {{ case.rejected_by }}{% else %}Draft &middot; {{ 'AI' if (case.review or {}).get('source') == 'ai' else 'rule-based' }}{% endif %}</div>
+      </div>
+      {% endif %}
+
+      {% if case.status == 'rejected' %}
+      <div class="err"><b>Rejected</b> by {{ case.rejected_by }} on {{ case.rejected_at|local }}<br>{{ case.rejection_reason }}</div>
+      {% endif %}
+
+      {% if finalizing %}
+      <div class="card card-pad" id="finalizeCard">
+        <div class="actions" style="justify-content:space-between;margin-bottom:4px">
+          <h2 style="margin:0">Finalize report</h2>
+        </div>
+        <p class="small muted" style="margin-top:0">Fill in the report details, check the findings below, then approve to issue the signed PDF &mdash; or reject if this case should not be reported as-is.</p>
+        <div id="readyBanner"></div>
+
+        <div class="finalize-section">
+          <h3>Patient &amp; report details</h3>
+          <form method="post" action="/cases/{{ case.id }}/report-details" id="detailsForm">
+            <div class="subgroup">
+              <div class="subgroup-label">Lab &amp; referral</div>
+              <div class="grid g3">
+                <div><label>Hospital / centre</label><input type="text" name="hospital" value="{{ case.hospital or '' }}"></div>
+                <div><label>Referring clinician</label><input type="text" name="referring_clinician" value="{{ case.referring_clinician or '' }}"></div>
+                <div><label>Indication for testing</label><input type="text" name="indication" value="{{ case.indication or '' }}"></div>
+              </div>
+            </div>
+            <div class="subgroup">
+              <div class="subgroup-label">Sequencing stats</div>
+              <div class="grid g3">
+                <div><label>Total read generated</label><input type="text" name="seq_total_gb" value="{{ case.seq_total_gb or '' }}" placeholder="e.g. 12.6 GB"></div>
+                <div><label>Data &ge; Q30</label><input type="text" name="seq_q30" value="{{ case.seq_q30 or '' }}" placeholder="e.g. 96.34 %"></div>
+                <div><label>Gene coverage file</label><input type="file" name="coverage_file" accept=".tsv,.txt,.csv"></div>
+              </div>
+            </div>
+            {% for s in case.samples %}
+            <div class="subgroup">
+              <div class="subgroup-label">{{ s.role|capitalize }} &mdash; {{ s.name }}</div>
+              <div class="grid g4">
+                <div><label>Patient ID</label><input type="text" name="{{ s.role }}_patient_id" value="{{ s.patient_id or '' }}"></div>
+                <div><label>PIN</label><input type="text" name="{{ s.role }}_pin" value="{{ s.pin or '' }}"></div>
+                <div><label>Age</label><input type="text" name="{{ s.role }}_age" value="{{ s.age or '' }}" placeholder="e.g. 4y 2m"></div>
+                <div><label>Specimen</label><input type="text" name="{{ s.role }}_sample_type" value="{{ s.sample_type or 'DNA' }}"></div>
+                <div><label>Sample number</label><input type="text" name="{{ s.role }}_sample_number" value="{{ s.sample_number or '' }}"></div>
+                <div><label>Collected on</label><input type="date" name="{{ s.role }}_collected_on" value="{{ s.collected_on or '' }}"></div>
+                <div><label>Received on</label><input type="date" name="{{ s.role }}_received_on" value="{{ s.received_on or '' }}"></div>
+              </div>
+            </div>
+            {% endfor %}
+            <div class="save-row"><button type="submit">Save details</button></div>
+          </form>
+        </div>
+
+        <div class="finalize-section">
+          <h3>Review the draft report</h3>
+          <div id="review" class="muted">No results yet.</div>
+        </div>
+
+        <div class="finalize-section">
+          <div class="actions" style="justify-content:space-between">
+            <div class="small muted">Approving issues the final, versioned PDF. Rejecting records why this case should not be reported.</div>
+            <div class="actions">
+              <button class="danger" type="button" id="rejectBtn">{{ icon('x-circle') }} Reject</button>
+              <form method="post" action="/cases/{{ case.id }}/approve" class="actions inline" onsubmit="return confirm('Approve and issue the final report? Make sure the review has been saved.')">
+                <input type="text" name="approver" value="{{ user }}" style="width:180px" placeholder="Approving scientist">
+                <button class="success" id="approveBtn" {% if not case.final_flag %}disabled title="Save the review first"{% endif %}>{{ icon('shield') }} Approve &amp; issue report</button>
+              </form>
+            </div>
+          </div>
+          <form method="post" action="/cases/{{ case.id }}/reject" id="rejectForm" class="hidden" style="margin-top:12px">
+            <label>Reason for rejection <span style="color:var(--pos)">*</span></label>
+            <textarea name="reason" rows="2" required placeholder="e.g. Sample quality insufficient; repeat testing required"></textarea>
+            <div class="save-row"><button class="danger" type="submit">Confirm reject</button><button class="ghost" type="button" id="cancelReject">Cancel</button></div>
+          </form>
+        </div>
+      </div>
+      {% endif %}
+
+      {% if case.status == 'approved' %}
+      <div class="note">{{ icon('shield') }} Approved by <b>{{ case.approved_by }}</b> on {{ case.approved_at|local }} &middot; report v{{ case.report_version }}</div>
+      <div class="card card-pad next-step">
+        <h3 style="margin-top:0">Signed report</h3>
+        <p class="small muted">This case is complete. View or download the final signed PDF, or check the evidence tabs above if you need to revisit how this result was reached.</p>
+        <div class="actions">
+          <a class="btn" href="/cases/{{ case.id }}/report" target="_blank">{{ icon('eye') }} View report</a>
+          <a class="btn ghost" href="/cases/{{ case.id }}/report.pdf">{{ icon('download') }} Download PDF</a>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="pane hidden" data-pane="patient">
+    <div class="grid g2" style="align-items:start">
+      <div>
+        <div class="side-section" style="padding-left:0;padding-right:0">
+          <h4>{{ 'Partners' if case.case_type == 'couple' else 'Family' if case.case_type == 'trio' else 'Patient' }}</h4>
+          {% for s in case.samples %}
+          <div class="person">
+            <span class="avatar">{{ s.name[:2] }}</span>
+            <div style="min-width:0">
+              <div class="nm">{{ s.name }}{% if s.affected %} <span class="flag flag-POSITIVE" style="font-size:10px;padding:1px 5px">AFFECTED</span>{% endif %}</div>
+              <div class="rl">{{ s.role|capitalize }} &middot; {{ (s.sex or '-')|capitalize }}</div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        {% if case.case_type != 'couple' %}
+        <div class="side-section" style="padding-left:0;padding-right:0">
+          <h4>Clinical history</h4>
+          <div class="history" style="max-height:none">{{ case.clinical_history or 'Not provided' }}</div>
+        </div>
+        {% endif %}
+      </div>
+      {% if case.case_type != 'couple' %}
+      <div class="side-section" style="padding-right:0">
+        <h4>HPO phenotype</h4>
+        <div class="ac"><input type="text" id="hpoSearch" placeholder="Add HPO term..." autocomplete="off" {% if case.status in ('processing','queued','approved','rejected') %}disabled{% endif %}><div class="ac-list hidden" id="hpoList"></div></div>
+        <div class="chips" id="hpoChips"></div>
+        <div class="xs muted" style="margin-top:6px">Changes take effect after Re-analyse.</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="pane hidden" data-pane="candidates"><div id="candidates" class="scroll"></div></div>
+  <div class="pane hidden" data-pane="couple"><div id="couple"></div></div>
+  <div class="pane hidden" data-pane="secondary"><div id="secondary"></div></div>
+  <div class="pane hidden" data-pane="qc"><div id="qc"></div></div>
+  <div class="pane hidden" data-pane="ai"><div id="aiOut"></div></div>
+  <div class="pane hidden" data-pane="activity">
+    <div id="warnings"></div>
+    <div class="log" id="events"></div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+window.CASE = {
+  id: {{ case.id }}, status: {{ case.status|tojson }}, type: {{ case.case_type|tojson }},
+  editable: {{ (case.status == 'review')|tojson }},
+  flags: {{ flags|tojson }}, sections: {{ sections|tojson }}, classes: {{ classes|tojson }},
+  hpo: {{ case.hpo_terms|tojson }},
+  hpoEditable: {{ (case.status not in ('processing','queued','approved','rejected'))|tojson }},
+  steps: {{ steps|tojson }},
+};
+</script>
+<script src="/static/case.js?v={{ static_version }}"></script>
+{% endblock %}

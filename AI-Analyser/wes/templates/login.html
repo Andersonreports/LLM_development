@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in - Exome AI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="/static/app.css?v={{ static_version }}">
+<style>
+  body { display: grid; place-items: center; min-height: 100vh; background: linear-gradient(160deg, #1a1530, #2a2147); }
+  .login-card { width: 100%; max-width: 380px; background: #fff; border-radius: 14px; box-shadow: var(--shadow-lg); padding: 32px 28px; }
+  .login-logo { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 22px; }
+  .login-logo .mark { width: 48px; height: 48px; border-radius: 12px; background: linear-gradient(135deg, #8b6fd1, #5b3fa6); display: grid; place-items: center; color: #fff; }
+  .login-logo .mark svg { width: 26px; height: 26px; }
+  .login-logo b { font-size: 17px; }
+  .login-logo span { font-size: 12.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="login-logo">
+    <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3c0 6 10 6 10 12s-10 6-10 6M17 3c0 6-10 6-10 12s10 6 10 6M8 7h8M8 17h8M10 12h4"/></svg></div>
+    <b>Exome AI</b><span>Clinical WES analysis</span>
+  </div>
+  {% if error %}<div class="err" style="margin-bottom:14px">{{ error }}</div>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div style="margin-bottom:14px"><label>Username</label><input type="text" name="username" autofocus required></div>
+    <div style="margin-bottom:18px"><label>Password</label><input type="password" name="password" required></div>
+    <button type="submit" style="width:100%;justify-content:center">Sign in</button>
+  </form>
+</div>
+</body>
+</html>
