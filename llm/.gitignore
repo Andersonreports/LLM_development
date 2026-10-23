@@ -4,4 +4,5 @@ __pycache__/
 # downloaded corpora, encoded token files and trained weights are regenerated, not committed
 data/
 checkpoints/
+checkpoints_*.txt
 *.pt

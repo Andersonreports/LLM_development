@@ -9,8 +9,52 @@ Transformer written in PyTorch, starting from **random weights**. No pretrained 
 |---|---|
 | Phase 1 - environment (Python, PyTorch + CUDA, RTX 3050 verified) | done |
 | Phase 2 - tokenizer + Transformer architecture | done |
-| Phase 3 - training pipeline (corpus, training loop, checkpoints) | next |
-| Phase 4 - text generation + evaluation | `GPT.generate` exists; CLI and evaluation next |
+| Phase 3 - training pipeline (corpus, training loop, checkpoints) | done - first run below |
+| Phase 4 - text generation + evaluation | `generate.py` done; systematic evaluation next |
+
+## Train and generate
+
+```powershell
+.venv\Scripts\python prepare_data.py                   # download Tiny Shakespeare, tokenizer, train/val split
+.venv\Scripts\python train.py                          # small model, 5000 steps (~15 min on the RTX 3050)
+.venv\Scripts\python train.py --resume                 # continue an interrupted run
+.venv\Scripts\python generate.py --prompt "ROMEO:" --tokens 300 --temperature 0.8
+```
+
+Checkpoints and `log.csv` (loss per evaluation) go to `checkpoints/<name>/`; `best.pt` is
+the lowest-validation-loss state and is what `generate.py` loads by default.
+
+## First run: Tiny Shakespeare, character-level (2026-10-23)
+
+Data: 1,115,394 characters, 65-character vocabulary, last 10% held out for validation
+(`data/shakespeare/meta.json` records source, licence and checksum).
+Model: `small` preset, 10.7M parameters, context 256, dropout 0.2, batch 64, AdamW,
+lr 1e-3 cosine to 1e-4, bf16. 5,000 steps in 15.4 min, 1.74 GB GPU memory.
+
+| Step | Train loss | Val loss | Sample |
+|---|---|---|---|
+| 0 | 4.30 | 4.30 | random characters (theory: ln 65 = 4.17) |
+| 250 | 1.99 | 2.10 | "I lon bead get thy lave diver bith;" - word shapes, play layout |
+| 1,000 | 1.26 | 1.53 | "Your sword, and he desire her best." - real words, character names |
+| **1,750** | **1.09** | **1.47** | **best validation loss -> `best.pt`** |
+| 5,000 | 0.60 | 1.72 | fluent, but partly memorised training text |
+
+**Overfitting from step ~1,750**: training loss kept falling while validation loss rose,
+so the model started memorising the training text instead of generalising. `best.pt`
+keeps the step-1,750 weights. Remedies to try: stop earlier, more dropout, a smaller
+model, or more data (1 MB is very little for 10.7M parameters).
+
+Generated from `best.pt` with the prompt `ROMEO:`:
+
+```
+ROMEO:
+If the king my chief stand hath need to my husband,
+So in the advantage of his story
+Would I live out of a grave-market mourn.
+```
+
+Correct spelling, metre-like lines and play formatting - and no meaning. This is the
+roadmap's key lesson in practice: fluent output is not evidence of understanding.
 
 ## Setup (Windows, once)
 
