@@ -3,6 +3,9 @@
 Roadmap track A of the ADVAT LLM project: a small GPT-style (decoder-only, causal)
 Transformer written in PyTorch, starting from **random weights**. No pretrained model is used.
 
+New to these ideas? Read the **[Learning Guide](LEARNING_GUIDE.md)**: every concept used
+here, explained in plain language with numbers from our own runs.
+
 ## Status
 
 | Roadmap step | State |
