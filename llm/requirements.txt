@@ -1,0 +1,5 @@
+# PyTorch is installed separately so the CUDA build is used:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+numpy
+tqdm
+pytest

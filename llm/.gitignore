@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.pytest_cache/
+# downloaded corpora, encoded token files and trained weights are regenerated, not committed
+data/
+checkpoints/
+*.pt
