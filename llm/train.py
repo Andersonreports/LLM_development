@@ -33,6 +33,9 @@ class TrainArgs:
     name: str = "shakespeare_char"
     preset: str = "small"
     block_size: int | None = None      # override the preset's context window
+    n_layer: int | None = None         # override the preset's number of blocks
+    n_head: int | None = None          # override the preset's attention heads
+    n_embd: int | None = None          # override the preset's width
     dropout: float = 0.2
     batch_size: int = 64
     max_iters: int = 5000
@@ -107,8 +110,7 @@ def train(a: TrainArgs) -> dict:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     overrides = {"vocab_size": tok.vocab_size, "dropout": a.dropout}
-    if a.block_size:
-        overrides["block_size"] = a.block_size
+    overrides |= {k: getattr(a, k) for k in ("block_size", "n_layer", "n_head", "n_embd") if getattr(a, k)}
     cfg = preset(a.preset, **overrides)
     model = GPT(cfg).to(a.device)
     opt = model.configure_optimizer(lr=a.lr, weight_decay=a.weight_decay)

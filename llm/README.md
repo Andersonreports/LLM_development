@@ -13,7 +13,8 @@ here, explained in plain language with numbers from our own runs.
 | Phase 1 - environment (Python, PyTorch + CUDA, RTX 3050 verified) | done |
 | Phase 2 - tokenizer + Transformer architecture | done |
 | Phase 3 - training pipeline (corpus, training loop, checkpoints) | done - first run below |
-| Phase 4 - text generation + evaluation | `generate.py` done; systematic evaluation next |
+| Phase 4 - text generation + evaluation | done - overfitting experiments below |
+| Phase 5 - scale (BPE tokenizer, larger corpus) | next |
 
 ## Train and generate
 
@@ -22,7 +23,12 @@ here, explained in plain language with numbers from our own runs.
 .venv\Scripts\python train.py                          # small model, 5000 steps (~15 min on the RTX 3050)
 .venv\Scripts\python train.py --resume                 # continue an interrupted run
 .venv\Scripts\python generate.py --prompt "ROMEO:" --tokens 300 --temperature 0.8
+.venv\Scripts\python evaluate.py --split val           # exact loss of every checkpoints/*/best.pt
+.venv\Scripts\python train.py --name my_exp --n-layer 4 --n-embd 256 --n-head 4 --dropout 0.3
 ```
+
+Data split (`prepare_data.py`): first 90% train, next 5% validation (picks checkpoints and
+compares settings), last 5% test (final score only).
 
 Checkpoints and `log.csv` (loss per evaluation) go to `checkpoints/<name>/`; `best.pt` is
 the lowest-validation-loss state and is what `generate.py` loads by default.
@@ -58,6 +64,28 @@ Would I live out of a grave-market mourn.
 
 Correct spelling, metre-like lines and play formatting - and no meaning. This is the
 roadmap's key lesson in practice: fluent output is not evidence of understanding.
+
+## Overfitting experiments (2026-10-23)
+
+One change at a time against the baseline above; same data, seed and all other settings.
+Validation/test losses are exact (`evaluate.py`, every token of the split). The split was
+changed to 90/5/5 for these runs, so the baseline was re-scored on the new validation text.
+
+| Run | Change | Params | Best step | Val loss | Test loss | Time | Gap train/val at end |
+|---|---|---|---|---|---|---|---|
+| A baseline | - | 10.7M | 1,750 | 1.390 | 1.563 | 15.4 min | 0.60 / 1.72 |
+| B | dropout 0.2 -> 0.3 | 10.7M | 2,500 | 1.382 | - | 15.2 min | 0.89 / 1.42 |
+| **C** | **4 layers, width 256** | **3.2M** | 4,750 | **1.369** | **1.525** | **6.0 min** | 1.08 / 1.37 |
+| D | 5,000 -> 2,500 steps | 10.7M | 2,000 | 1.374 | - | 7.7 min | 0.98 / 1.37 |
+
+- All three changes reduced overfitting and beat the baseline on validation.
+- **C wins**: a model 3x smaller was slightly better, 2.5x faster and used 0.78 GB instead
+  of 1.74 GB - with only 1 MB of text, the extra capacity was mostly used for memorising.
+- Test was scored once, only for the baseline and the chosen model: C 1.525 vs 1.563.
+  Test loss is higher than validation for both because the test passage (end of the
+  file) is harder, not because of a bug; the ranking is the same.
+- The differences are small (0.01-0.02) and come from one seed each; repeating each run
+  with 2-3 seeds would show how much is noise.
 
 ## Setup (Windows, once)
 

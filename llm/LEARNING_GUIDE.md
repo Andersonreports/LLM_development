@@ -293,14 +293,25 @@ early stopping, more data).
 
 ## 6. Checking that it learns: validation and overfitting
 
-**Training set** - the text the model learns from (the first 90%, 1,003,855 characters).
+**Training set** - the text the model learns from (the first 90%, 1,003,856 characters).
 
-**Validation set** - text held back that the model **never trains on** (the last 10%,
-111,539 characters). Measuring loss here tells us whether the model learned general
-patterns or just memorised.
+**Validation set** - text held back that the model **never trains on** (the next 5%,
+55,769 characters). Measuring loss here tells us whether the model learned general
+patterns or just memorised. We also use it to **choose**: which checkpoint to keep, which
+settings work best.
 
-**Test set** - a third, locked-away portion used only once at the very end for a final,
-honest score. (We will add this for serious evaluations.)
+**Test set** - the last 5% (55,769 characters), locked away and used **only once at the
+end** for a final, honest score. Why not just use validation? Because every time we pick
+the setting with the best validation loss, we slightly "tune to" the validation text, so
+its score becomes a bit optimistic. The test set has never influenced any decision, so its
+score is unbiased.
+
+```
+[ train (90%) .................................. | val (5%) | test (5%) ]
+   learn from this                                  choose with   final score only
+```
+
+(Our first run used a 90/10 train/validation split; we added the test set in Phase 4.)
 
 **Why we split by position, not randomly:** neighbouring lines of a play are similar. If
 validation lines were scattered among training lines, the model would effectively have
@@ -328,6 +339,58 @@ actually want.
 **Why it overfitted:** 10.7 million parameters is a lot of memory for only 1 million
 characters of text. Remedies: more data, a smaller model, more dropout, or stopping
 earlier.
+
+### Running fair experiments (what we did in Phase 4)
+
+**Hyperparameter** - a setting *we* choose before training (dropout, model size, number of
+steps, learning rate), as opposed to the parameters the model learns itself.
+
+**Baseline** - the reference result every new idea is compared against. Our baseline is
+the first run (run A).
+
+**Controlled experiment / ablation** - change **one thing at a time**, keep everything
+else identical (same data, same seed, same other settings). Then any difference in results
+must come from that one change. If we changed dropout *and* model size together and the
+result improved, we would not know which one helped.
+
+**Model capacity** - how much a model *can* memorise, roughly its number of parameters. Too
+much capacity for too little data leads to overfitting.
+
+Our three experiments against the baseline, all aimed at reducing overfitting:
+
+| Run | One change | Parameters | Validation loss | Time | Result |
+|---|---|---|---|---|---|
+| A (baseline) | - | 10.7M | 1.390 | 15.4 min | overfits strongly after step 1,750 |
+| B | more dropout (0.2 → 0.3) | 10.7M | 1.382 | 15.2 min | slower learning, less memorising |
+| **C** | **smaller model** (4 layers, width 256) | **3.2M** | **1.369** | **6.0 min** | **best, and fastest** |
+| D | fewer steps (5,000 → 2,500) | 10.7M | 1.374 | 7.7 min | stops before memorising sets in |
+
+How strongly each run overfitted, shown by the training/validation gap at the end:
+
+```
+A  train 0.60  val 1.72   ← big gap: memorised the training text
+B  train 0.89  val 1.42
+D  train 0.98  val 1.37
+C  train 1.08  val 1.37   ← small gap: learned general patterns
+```
+
+**Lesson: bigger is not automatically better.** With only 1 MB of text, the 3.2M-parameter
+model beat the 10.7M one - and trained 2.5x faster using half the GPU memory. The bigger
+model spent its extra capacity memorising. More capacity only pays off with more data.
+
+**Final test score** (run once, for the baseline and the winner only):
+C **1.525** vs baseline 1.563. Both are higher than their validation scores because the
+test passage (the end of the file) happens to be harder text - the important thing is that
+the ranking stayed the same.
+
+**Sampled vs exact evaluation** - during training, `train.py` *estimates* loss from 100
+random batches (fast, slightly noisy). `evaluate.py` computes the *exact* loss over every
+token of a split. Use exact numbers when comparing experiments.
+
+**Noise / run-to-run variance** - training involves randomness (initial weights, which
+batches are drawn, dropout). Two runs with different seeds give slightly different
+results. Our differences (0.01-0.02) are small, so to be sure a winner is real you would
+repeat each run with 2-3 seeds and compare the averages.
 
 **Perplexity** - another way of expressing loss (perplexity = e^loss). Our best validation
 loss 1.47 means perplexity ≈ 4.3: on average the model is as unsure as if choosing between
@@ -518,7 +581,9 @@ VRAM. Scaling is not just changing one setting.
 | Attention | Mechanism letting each token use information from relevant earlier tokens |
 | Autocast | Automatic use of lower precision (bf16) where safe |
 | Autograd | PyTorch's automatic calculation of gradients |
+| Ablation / controlled experiment | Changing one setting at a time to see its effect |
 | Backpropagation | Computing how each parameter contributed to the error |
+| Baseline | Reference result that new ideas are compared against |
 | Batch | Group of text chunks processed together in one step |
 | bf16 | 16-bit number format that saves memory with little accuracy loss |
 | BPE | Byte Pair Encoding: tokenizer that merges frequent pairs into sub-word tokens |
@@ -538,6 +603,7 @@ VRAM. Scaling is not just changing one setting.
 | Gradient | Direction and amount to change a parameter to reduce loss |
 | Gradient clipping | Capping very large gradients for stability |
 | Greedy decoding | Always choosing the most likely next token (temperature 0) |
+| Hyperparameter | A setting chosen before training (dropout, size, steps, learning rate) |
 | Inference | Using a trained model to produce output |
 | Iteration / step | One training update |
 | LayerNorm | Rescales values to a stable range |
@@ -545,6 +611,8 @@ VRAM. Scaling is not just changing one setting.
 | Logits | Raw scores for each possible next token |
 | Loss | Number measuring prediction error (lower is better) |
 | MLP | Small feed-forward network inside each block |
+| Model capacity | How much a model can memorise; roughly its parameter count |
+| Noise (run-to-run variance) | Differences between runs caused only by randomness |
 | Overfitting | Better on training data, worse on new data: memorising |
 | Parameters / weights | The learned numbers inside the model |
 | Perplexity | e^loss; a language-modelling quality measure, not a correctness measure |
@@ -576,3 +644,4 @@ VRAM. Scaling is not just changing one setting.
 | 2026-10-23 | Phase 2 - architecture | Character and BPE tokenizers; GPT-style Transformer with random initialisation; 14 tests | Tokens, tokenizers, embeddings, attention, causal mask, blocks, parameters, logits, loss |
 | 2026-10-23 | Phase 3 - training | Tiny Shakespeare prepared (65-char vocab, 90/10 split); `small` model trained 5,000 steps in 15.4 min; best val loss 1.47 at step 1,750, then overfitting | Training loop, batch, gradient, backprop, AdamW, learning-rate schedule, validation, overfitting, early stopping, checkpoints, perplexity, provenance |
 | 2026-10-23 | Phase 4 - generation (started) | `generate.py`; temperature, top-k, top-p, seed demonstrated on the trained model | Autoregressive generation, sampling, temperature, top-k, top-p, seed, greedy decoding |
+| 2026-10-23 | Phase 4 - evaluation & overfitting | Added locked test set (90/5/5 split) and exact `evaluate.py`; ran 3 controlled experiments. Smaller model (3.2M) won: val 1.369, test 1.525 vs baseline 1.390 / 1.563, in 6 min | Test set, hyperparameter, baseline, controlled experiment/ablation, model capacity, sampled vs exact evaluation, run-to-run noise |

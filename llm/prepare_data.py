@@ -38,7 +38,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, help="output folder (default: data/<corpus>[_bpe])")
     ap.add_argument("--tokenizer", default="char", choices=["char", "bpe"])
     ap.add_argument("--vocab", type=int, default=2048, help="BPE vocabulary size")
-    ap.add_argument("--val-fraction", type=float, default=0.1)
+    ap.add_argument("--val-fraction", type=float, default=0.05)
+    ap.add_argument("--test-fraction", type=float, default=0.05,
+                    help="final part of the text, locked away for the final score (never used to choose settings)")
     args = ap.parse_args()
 
     name = args.text.stem if args.text else args.corpus
@@ -65,11 +67,17 @@ def main() -> None:
     tok.save(out / "tokenizer.json")
 
     ids = np.array(tok.encode(text), dtype=np.uint16)
-    # split by position, not randomly: the validation text is a continuous passage the model
-    # never trains on, so validation loss measures generalisation without leakage
+    # split by position, not randomly: validation and test are continuous passages the model
+    # never trains on, so their loss measures generalisation without leakage.
+    #   [ train ............................ | val | test ]
+    # val is used during training to pick the best checkpoint and compare settings;
+    # test is only used for the final score, so it stays an unbiased estimate
     n_val = int(len(ids) * args.val_fraction)
-    ids[:-n_val].tofile(out / "train.bin")
-    ids[-n_val:].tofile(out / "val.bin")
+    n_test = int(len(ids) * args.test_fraction)
+    n_train = len(ids) - n_val - n_test
+    ids[:n_train].tofile(out / "train.bin")
+    ids[n_train:n_train + n_val].tofile(out / "val.bin")
+    ids[n_train + n_val:].tofile(out / "test.bin")
 
     meta = {
         "source": source,
@@ -78,12 +86,14 @@ def main() -> None:
         "tokenizer": tok.kind,
         "vocab_size": tok.vocab_size,
         "tokens_total": int(len(ids)),
-        "tokens_train": int(len(ids) - n_val),
+        "tokens_train": n_train,
         "tokens_val": n_val,
-        "split": f"last {args.val_fraction:.0%} of the text is validation",
+        "tokens_test": n_test,
+        "split": f"first {n_train / len(ids):.0%} train, next {args.val_fraction:.0%} validation, "
+                 f"last {args.test_fraction:.0%} test",
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    print(f"vocab {tok.vocab_size} | train {meta['tokens_train']:,} tokens | val {n_val:,} tokens -> {out}")
+    print(f"vocab {tok.vocab_size} | train {n_train:,} | val {n_val:,} | test {n_test:,} tokens -> {out}")
 
 
 if __name__ == "__main__":

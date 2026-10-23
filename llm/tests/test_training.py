@@ -44,6 +44,18 @@ def test_training_lowers_loss_and_resumes(tmp_path):
     assert len(tok.decode(out[0].tolist())) == 23
 
 
+def test_size_overrides_and_full_evaluation(tmp_path):
+    from evaluate import evaluate
+    _prepare(tmp_path)
+    np.fromfile(tmp_path / "val.bin", dtype=np.uint16).tofile(tmp_path / "test.bin")
+    train(_args(tmp_path, max_iters=30, n_layer=1, n_embd=64, n_head=2))
+    ck = torch.load(tmp_path / "ck" / "t" / "best.pt", weights_only=False)
+    assert (ck["config"]["n_layer"], ck["config"]["n_embd"]) == (1, 64)
+    res = evaluate(tmp_path / "ck" / "t" / "best.pt", ["val", "test"], "cpu")
+    assert res["val_loss"] == res["test_loss"] > 0      # identical text -> identical deterministic score
+    assert abs(res["val_ppl"] - np.exp(res["val_loss"])) < 0.01 * res["val_ppl"]
+
+
 def test_learning_rate_schedule():
     a = TrainArgs(lr=1e-3, min_lr=1e-4, warmup_iters=10, max_iters=110)
     assert lr_at(0, a) == 1e-4                            # warm-up starts small
