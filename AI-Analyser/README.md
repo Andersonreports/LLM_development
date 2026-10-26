@@ -144,12 +144,19 @@ they propose is re-scored by `wes/acmg.py` and shown to the reviewer.
 ollama pull qwen3.5:4b          # once
 ```
 
-Two safeguards, both on by default:
-- `WES_AI_ALLOW_CRITERIA_REMOVAL=false` - the model cannot delete an ACMG criterion the
-  engine derived; removals become reviewer-attention notes instead.
-- `WES_AI_STRICT_PROMPT=true` - adds rules making the supplied case data authoritative
-  (the chromosome is in the variant key; never contradict supplied inheritance or
-  frequencies; flag uncertainty rather than guessing).
+Safeguards, all on by default. Each exists because the model failed that way in testing,
+and in every case an instruction was not enough - the rule had to be enforced in code:
+
+| Setting | What it prevents |
+|---|---|
+| `WES_AI_ALLOW_CRITERIA_REMOVAL=false` | Deleting an ACMG criterion the engine derived. Removals become reviewer notes |
+| `WES_MIN_PHENOTYPE_POSITIVE=0.3` | Calling a case POSITIVE when no reported variant matches the patient's phenotype. The AI's narrative is withdrawn with the flag, so the report cannot contradict itself |
+| criterion-code normalisation | `PVS1_VeryStrong` was accepted as a new criterion, counting PVS1 twice (9 points became 17). Codes are now normalised and validated |
+| `WES_AI_STRICT_PROMPT=true` | Helps, but does not bind: the supplied data is authoritative, chromosomes come from the variant key, common variants are not pathogenic |
+
+`WES_OLLAMA_THINK` should stay **false**. Thinking mode existed to stop criteria deletion,
+which code now blocks; with the longer rule set it runs away and hits the token limit
+(benchmark 10/20 at 13 min per case, versus 20/20 at 28 s with it off).
 
 ### Benchmark
 
@@ -158,31 +165,53 @@ live in git) and five automated checks each: correct flag, correct variants in t
 section, no criteria deleted, stated classification consistent with its own criteria, and
 no fabricated claims. Run `python -m bench.run`; results land in `bench/results/`.
 
-**qwen3.5:4b, thinking on, strict prompt on (2026-10-26): 19/20**
+**qwen3.5:4b, thinking off, strict prompt on (2026-10-26): 20/20 in 109 s**
 
-| Case | Score | Time | Failure |
-|---|---|---|---|
-| dominant_de_novo (SCN1A, *de novo*) | 4/5 | 222 s | states Dravet syndrome is autosomal recessive (it is dominant) although the supplied data says AD |
-| recessive_comphet (PAH, in trans) | 5/5 | 199 s | - |
-| negative | 5/5 | 149 s | - |
-| vus_inconclusive (MYH7) | 5/5 | 271 s | - |
+| Case | Score | Time |
+|---|---|---|
+| dominant_de_novo (SCN1A, *de novo*) | 5/5 | 30 s |
+| recessive_comphet (PAH, in trans) | 5/5 | 28 s |
+| negative | 5/5 | 25 s |
+| vus_inconclusive (MYH7) | 5/5 | 26 s |
 
-Settings sweep on the SCN1A case (same model, one change at a time):
+How it got there, measured one change at a time:
 
-| Thinking | Strict prompt | Score | Time | Tried to delete criteria |
-|---|---|---|---|---|
-| off | off | 3/5 | 42 s | PM2, PP3 |
-| **on** | off | 4/5 | 207 s | none |
-| off | **on** | 3/5 | 41 s | PVS1 |
-| **on** | **on** | 4/5 | 224 s | none |
+| Configuration | Score | Time/case |
+|---|---|---|
+| Baseline, thinking off | 3/5 on SCN1A | 42 s |
+| Thinking on | 19/20 | ~210 s |
+| Thinking on, after the guardrails and longer rules | **10/20** | ~770 s - two cases ran to the token limit and failed |
+| **Thinking off, guardrails in code** | **20/20** | **28 s** |
 
-Thinking mode is what stops the model deleting evidence; it costs roughly 5x the time. The
-strict prompt did not stop deletion on its own, but it changed the remaining error from
-acting on a false belief to flagging it for the reviewer.
+The jump came from moving rules into code, not from the prompt. Once criteria deletion was
+blocked in code, thinking mode had nothing left to protect against, and removing it fixed
+the regression and made the tool 28x faster.
 
-**Not yet validated for clinical use.** Four synthetic cases can show a model is broken;
-they cannot show it is good. Before clinical use, add real signed-off cases (kept out of
-git) and have scientists compare drafts.
+### Validation status
+
+**Not validated for clinical use.** Four synthetic cases and one real case can show that
+specific failures are fixed; they cannot show the tool is right in general.
+
+| Check | Result |
+|---|---|
+| Synthetic benchmark | 20/20 |
+| One real case with a signed report (WES, Sep 2026) | tool NEGATIVE = lab NEGATIVE |
+
+That real case is also where the current limits were found. Before clinical use: add more
+signed-off cases (patient data - keep them out of git), and have scientists compare drafts
+against what they actually issued.
+
+### Known gaps found on the real case
+
+- **PVS1 ignores allele frequency.** A frameshift at 0.96% population frequency received
+  the full 8 points. Frequency should attenuate or withhold PVS1.
+- **BS1 uses one generic threshold.** 1% for any recessive gene; the variants above sat at
+  0.956% and escaped. Disease-appropriate ceilings are needed.
+- **PM3 can be circular.** Two variants in the same gene each counted the other as the
+  "pathogenic" partner, when both were only pathogenic by virtue of the same analysis.
+- **No indication-based gene restriction.** The whole exome is ranked equally, so a
+  microcephaly gene surfaced in a child investigated for gastrointestinal bleeding. The
+  laboratory's own workflow narrows to an indication gene list first.
 
 ## Known limitations
 

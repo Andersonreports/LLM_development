@@ -46,9 +46,22 @@ PARALOG_PRONE_GENES = {
 }
 
 POINTS = {"VeryStrong": 8, "Strong": 4, "Moderate": 2, "Supporting": 1}
+VALID_CODES = ({"PVS1", "BA1"} | {f"PS{i}" for i in range(1, 5)} | {f"PM{i}" for i in range(1, 7)}
+               | {f"PP{i}" for i in range(1, 6)} | {f"BS{i}" for i in range(1, 5)}
+               | {f"BP{i}" for i in range(1, 8)})
+_STRENGTH_SUFFIX = re.compile(r"[_-](?:very\s?strong|strong|moderate|supporting|standalone|p|m|s)$", re.I)
 CLASS_ORDER = ["Pathogenic", "Likely pathogenic", "Uncertain significance", "Likely benign", "Benign"]
 SHORT = {"Pathogenic": "P", "Likely pathogenic": "LP", "Uncertain significance": "VUS",
          "Likely benign": "LB", "Benign": "B"}
+
+
+def normalise_code(code: str) -> str | None:
+    """A model may write a criterion as 'PVS1_VeryStrong', 'pvs1' or 'PM2_P'. Reduce it to
+    the bare code so it matches what the engine produced; None if it is not a real
+    criterion. Without this, 'PVS1_VeryStrong' looks like a new criterion and the same
+    evidence gets counted twice."""
+    c = _STRENGTH_SUFFIX.sub("", (code or "").strip()).upper().replace(" ", "")
+    return c if c in VALID_CODES else None
 
 
 def _crit(code: str, strength: str, reason: str, source: str = "auto") -> dict:

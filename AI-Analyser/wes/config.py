@@ -85,6 +85,17 @@ class Settings:
     # Append explicit data-discipline rules to the interpretation prompt. Needed by small
     # local models, harmless for large ones
     ai_strict_prompt: bool = _env("WES_AI_STRICT_PROMPT", True)
+    # Lowest phenotype-similarity score (Resnik best-match over HPO, 0-1) at which a variant
+    # may be said to explain the patient's presentation. A severe variant in a gene whose
+    # disease does not match the patient is an incidental finding, not a diagnosis.
+    #
+    # 0.3 was chosen by the team when the ranking engine was first written, where it only
+    # steered the rule-based flag. It now also overrides the AI's result flag
+    # (pipeline._enforce_phenotype_gate), so it carries more weight than it was set for and
+    # has not yet been validated against signed-off cases. On the first real case the best
+    # candidate in the whole list scored 0.309 - a 0.009 margin - so the value is worth
+    # checking before routine use.
+    min_phenotype_for_positive: float = _env("WES_MIN_PHENOTYPE_POSITIVE", 0.3)
 
     # Local model (Ollama)
     ollama_url: str = _env("WES_OLLAMA_URL", "http://127.0.0.1:11434")

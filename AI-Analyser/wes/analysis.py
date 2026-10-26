@@ -190,7 +190,7 @@ def rule_based_flag(case_type: str, candidates: list[dict], couple: dict | None,
                           "of any uncertain findings.",
                 "keys": []}
 
-    min_pheno = 0.3
+    min_pheno = settings.min_phenotype_for_positive
     by_key = {v["key"]: v for v in candidates}
     positive, inconclusive = [], []
     for v in candidates:

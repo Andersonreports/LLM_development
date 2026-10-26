@@ -322,7 +322,8 @@ def _run_ai(db, case: Case) -> None:
         if v is None:
             attention.append(f"AI referenced unknown variant key {f['variant_key']} - ignored")
             continue
-        removed = set(f["criteria_removed"])
+        # the model does not always spell a criterion the way the engine does
+        removed = {acmg.normalise_code(c) for c in f["criteria_removed"]} - {None}
         if removed and not settings.ai_allow_criteria_removal:
             # removing an auto criterion can silently downgrade a real finding, so the
             # suggestion goes to the reviewer and the computed criteria stand
@@ -332,11 +333,17 @@ def _run_ai(db, case: Case) -> None:
                 "criterion manually only if the evidence really contradicts it")
             removed = set()
         crit = [c for c in v["acmg"]["criteria"] if c["code"] not in removed]
-        existing = {c["code"] for c in crit}
         for c in f["criteria_added"]:
-            if c["code"] in existing:
-                crit = [x for x in crit if x["code"] != c["code"]]
-            crit.append(acmg._crit(c["code"], c["strength"], c["reason"], source="ai"))
+            code = acmg.normalise_code(c["code"])
+            if code is None:
+                attention.append(
+                    f"{v['gene']} {v.get('hgvsc') or v.get('variant_id')}: AI proposed an unrecognised "
+                    f"criterion '{c['code']}' - ignored. Its reason was: {c['reason'][:200]}")
+                continue
+            # replacing rather than appending keeps one entry per criterion: a duplicate
+            # would count the same evidence twice and inflate the classification
+            crit = [x for x in crit if x["code"] != code]
+            crit.append(acmg._crit(code, c["strength"], c["reason"], source="ai"))
         merged = acmg.reclassify({**v["acmg"], "criteria": crit})
         if merged["classification"] != f["classification"]:
             attention.append(
@@ -345,6 +352,10 @@ def _run_ai(db, case: Case) -> None:
         findings.append({**f, "acmg": merged, "include": f["report_section"] != "not_reported"})
     data["findings"] = findings
     data["reviewer_attention"] = attention
+    proposed = data["result_flag"]
+    if _enforce_phenotype_gate(data, findings, pool, results):
+        _event(db, case, "warning", f"AI proposed {proposed} but no reported variant matches the phenotype "
+                                    f"well enough; flag set to {data['result_flag']} - see reviewer notes")
     case.ai_result = data
     case.ai_usage = usage
     case.ai_flag = data["result_flag"]
@@ -366,6 +377,51 @@ def _run_ai(db, case: Case) -> None:
     _event(db, case, "info", f"AI flag: {data['result_flag']} - {data['flag_rationale']}")
     if case.rule_flag and case.rule_flag != data["result_flag"]:
         _event(db, case, "warning", f"AI flag ({data['result_flag']}) differs from rule-based flag ({case.rule_flag}) - review carefully")
+
+
+def _enforce_phenotype_gate(data: dict, findings: list[dict], pool: dict[str, dict],
+                            results: dict) -> bool:
+    """POSITIVE means "this explains the patient's presentation". That claim needs the
+    gene's disease to actually match the phenotype, which `phenotype_score` measures.
+
+    The rule engine already applies this gate. The AI does not reliably respect it even
+    when the rule is spelled out in its instructions - on a real case it reported a
+    biallelic null variant scoring 0.06 as POSITIVE and wrote that it "aligns with the
+    proband's phenotype". So the gate is enforced here rather than requested.
+
+    The finding itself is kept and still reported; only the case-level claim is withdrawn.
+    The narrative is withdrawn with it - it was written to argue a diagnosis - so the
+    report cannot carry prose that contradicts its own flag. Both are left in the
+    reviewer notes. A reviewer who disagrees can set POSITIVE and rewrite the text."""
+    if data["result_flag"] != "POSITIVE":
+        return False
+    diagnostic = [pool.get(f["variant_key"], {}) for f in findings
+                  if f.get("report_section") in ("primary", "vus")]
+    best = max((v.get("phenotype_score") or 0.0 for v in diagnostic), default=0.0)
+    threshold = settings.min_phenotype_for_positive
+    if best >= threshold:
+        return False
+
+    fallback = (results.get("rule_flag") or {}).get("flag") or "INCONCLUSIVE"
+    if diagnostic:
+        genes = ", ".join(sorted({v.get("gene", "?") for v in diagnostic}))
+        why = (f"the best phenotype match among the reported variants ({genes}) is {best:.2f}, "
+               f"below the {threshold:.2f} needed to say a variant explains this patient")
+    else:
+        why = ("no variant was placed in the primary or VUS section, so nothing was offered as the "
+               "explanation for this patient (carrier and secondary findings do not make a case positive)")
+    notes = [f"AI proposed POSITIVE, but {why}. Flag set to {fallback} (the rule-based result), and the "
+             "AI's summary and interpretation were withdrawn because they argue for a diagnosis. Both are "
+             "kept below. If the gene-disease link really does fit this presentation, set the flag back to "
+             "POSITIVE and write the text yourself."]
+    for label, key in (("summary", "summary_line"), ("interpretation", "clinical_interpretation")):
+        text = (data.get(key) or "").strip()
+        if text:
+            notes.append(f"Withdrawn AI {label} (not used in the report): {text}")
+        data[key] = ""
+    data["reviewer_attention"] = notes + list(data.get("reviewer_attention", []))
+    data["result_flag"] = fallback
+    return True
 
 
 def default_clinical_history(case: Case) -> str:
