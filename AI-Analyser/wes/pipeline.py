@@ -278,8 +278,9 @@ def _run_ai(db, case: Case) -> None:
         _event(db, case, "warning", f"Previous review saved by {case.review['edited_by']} was replaced by a new draft")
     case.final_flag = None
     if not ai.available():
-        _event(db, case, "stage", "[ai:skipped] AI interpretation skipped - AI assistant not configured")
-        _event(db, case, "warning", "AI assistant is not configured (no API key set) - a rule-based draft was prepared instead. You can still review and edit everything below.")
+        _event(db, case, "stage", "[ai:skipped] AI interpretation skipped - AI assistant not available")
+        _event(db, case, "warning", f"AI assistant is not available ({ai.describe_backend()}) - a rule-based "
+                                    "draft was prepared instead. You can still review and edit everything below.")
         case.ai_result, case.ai_flag = None, None
         case.review = _with_report_fields(case, _with_audit(draft_from_rules(case, pool), pool))
         db.commit()
@@ -351,6 +352,9 @@ def _run_ai(db, case: Case) -> None:
     }
     case.review = _with_report_fields(case, _with_audit(case.review, pool))
     db.commit()
+    # which model wrote the draft is part of the case's audit trail
+    _event(db, case, "info", f"Interpretation drafted by {ai.describe_backend()}"
+                             + (f" in {usage['duration_s']}s" if usage.get("duration_s") else ""))
     _event(db, case, "info", f"AI flag: {data['result_flag']} - {data['flag_rationale']}")
     if case.rule_flag and case.rule_flag != data["result_flag"]:
         _event(db, case, "warning", f"AI flag ({data['result_flag']}) differs from rule-based flag ({case.rule_flag}) - review carefully")

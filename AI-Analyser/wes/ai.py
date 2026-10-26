@@ -1,18 +1,27 @@
-"""Claude-powered steps: clinical-history -> HPO extraction, and case-level
-variant interpretation (ranking, ACMG refinement, result flag, report text).
+"""AI steps: clinical-history -> HPO extraction, and case-level variant
+interpretation (ranking, ACMG refinement, result flag, report text).
 
-Only de-identified data is sent: age, sex, clinical text with the patient's
-name/ID scrubbed, HPO terms, and variant-level evidence.
+Two interchangeable backends, selected with WES_AI_BACKEND:
+  "local"  (default) a model served by Ollama on this machine - no case data
+           leaves the network
+  "claude" the Anthropic API - de-identified data only (age, sex, clinical text
+           with names/IDs scrubbed, HPO terms, variant evidence), and it has to
+           be enabled deliberately
+
+Both receive the same prompts and must return the same validated schema, so the
+rest of the pipeline never knows which model answered. Whatever the backend
+proposes is re-scored in code (see pipeline._run_ai) and shown to the reviewer.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Literal, Optional
 
-import anthropic
-from pydantic import BaseModel, ConfigDict
+import httpx
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .config import settings
 
@@ -76,19 +85,89 @@ class InterpretationOut(_Strict):
     reviewer_attention: list[str]
 
 
-# ------------------------------------------------------------------ client
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(max_retries=3, timeout=900)
+# ------------------------------------------------------------------ backends
+def backend() -> str:
+    return "claude" if settings.ai_backend == "claude" else "local"
+
+
+def describe_backend() -> str:
+    """One line for the /system page and the audit log."""
+    return (f"Anthropic API ({settings.anthropic_model})" if backend() == "claude"
+            else f"local model {settings.ollama_model} via Ollama")
 
 
 def available() -> bool:
+    """True when the configured model can actually be reached right now. When it
+    cannot, the pipeline still completes and produces the rule-based draft."""
     if not settings.ai_enabled:
         return False
-    import os
-    return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    if backend() == "claude":
+        return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    try:
+        tags = httpx.get(f"{settings.ollama_url}/api/tags", timeout=3.0).json()
+    except Exception:  # noqa: BLE001 - service down, wrong URL, bad response
+        return False
+    names = {m.get("name", "") for m in tags.get("models", [])}
+    want = settings.ollama_model
+    # a tag without a version matches "name:latest"
+    return want in names or f"{want}:latest" in names or any(n.split(":")[0] == want for n in names)
 
 
 def _call(system: str, user: str, schema: type[BaseModel], effort: str, max_tokens: int = 32000):
+    if backend() == "local":
+        return _call_ollama(system, user, schema, max_tokens)
+    return _call_claude(system, user, schema, effort, max_tokens)
+
+
+def _call_ollama(system: str, user: str, schema: type[BaseModel], max_tokens: int):
+    """Ollama's /api/chat with `format` set to the JSON Schema of the expected model,
+    so the server constrains generation to valid JSON. Temperature 0: the same case
+    must produce the same draft."""
+    payload = {
+        "model": settings.ollama_model,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "stream": False,
+        "think": settings.ollama_think,
+        "format": schema.model_json_schema(),
+        "options": {"temperature": 0, "num_ctx": settings.ollama_num_ctx, "num_predict": max_tokens},
+    }
+    try:
+        resp = httpx.post(f"{settings.ollama_url}/api/chat", json=payload,
+                          timeout=httpx.Timeout(settings.ollama_timeout, connect=10.0))
+    except httpx.ConnectError as e:
+        raise AIError(f"Local model server not reachable at {settings.ollama_url} - is Ollama running?") from e
+    except httpx.TimeoutException as e:
+        raise AIError(f"Local model timed out after {settings.ollama_timeout}s") from e
+    if resp.status_code == 404:
+        raise AIError(f"Model '{settings.ollama_model}' is not installed - run: ollama pull {settings.ollama_model}")
+    if resp.status_code != 200:
+        raise AIError(f"Local model server error {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    if data.get("done_reason") == "length":
+        raise AIError("Local model response truncated - reduce WES_AI_MAX_CANDIDATES or raise WES_OLLAMA_NUM_CTX")
+    content = (data.get("message") or {}).get("content") or ""
+    if not content.strip():
+        raise AIError("Local model returned an empty response")
+    try:
+        parsed = schema.model_validate_json(content)
+    except ValidationError as e:
+        # a small model can emit valid JSON that does not match the schema
+        raise AIError(f"Local model output did not match the expected format: {str(e)[:400]}") from e
+    except ValueError as e:
+        raise AIError(f"Local model did not return valid JSON: {str(e)[:300]}") from e
+    usage = {"input_tokens": data.get("prompt_eval_count"), "output_tokens": data.get("eval_count"),
+             "model": data.get("model", settings.ollama_model), "backend": "local", "request_id": None,
+             "duration_s": round((data.get("total_duration") or 0) / 1e9, 1)}
+    return parsed, usage
+
+
+def _call_claude(system: str, user: str, schema: type[BaseModel], effort: str, max_tokens: int):
+    import anthropic  # optional dependency: only needed for this backend
+
+    def _client() -> "anthropic.Anthropic":
+        return anthropic.Anthropic(max_retries=3, timeout=900)
+
     try:
         with _client().beta.messages.stream(
             model=settings.anthropic_model,
@@ -120,7 +199,7 @@ def _call(system: str, user: str, schema: type[BaseModel], effort: str, max_toke
     if parsed is None:
         raise AIError("Claude returned no structured output")
     usage = {"input_tokens": msg.usage.input_tokens, "output_tokens": msg.usage.output_tokens,
-             "model": msg.model, "request_id": getattr(msg, "_request_id", None)}
+             "model": msg.model, "backend": "claude", "request_id": getattr(msg, "_request_id", None)}
     return parsed, usage
 
 
@@ -235,3 +314,13 @@ def interpret(context: dict) -> tuple[InterpretationOut, dict]:
     user = ("Interpret this exome case and return the structured result.\n\n<case>\n"
             + json.dumps(payload, indent=1, default=str) + "\n</case>")
     return _call(INTERP_SYSTEM, user, InterpretationOut, effort=settings.ai_effort)
+
+
+def check() -> dict:
+    """Backend reachability, for the /system page."""
+    info = {"backend": backend(), "description": describe_backend(), "enabled": settings.ai_enabled,
+            "available": available()}
+    if backend() == "local":
+        info["url"] = settings.ollama_url
+        info["hint"] = f"run: ollama pull {settings.ollama_model}"
+    return info

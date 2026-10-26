@@ -243,7 +243,7 @@ def system(request: Request, user=Depends(current_user)):
     k = kb()
     return templates.TemplateResponse(request, "system.html", {
         "tools": tools_available(), "kb_warnings": k.warnings, "genes": len(k.genes),
-        "hpo_terms": len(k.ontology.terms) if k.ontology else 0, "ai": ai.available(),
+        "hpo_terms": len(k.ontology.terms) if k.ontology else 0, "ai_check": ai.check(),
         "settings": settings, "user": user, "nav": "system"})
 
 

@@ -72,10 +72,27 @@ class Settings:
     # How many ranked candidates are handed to the AI interpreter
     ai_max_candidates: int = _env("WES_AI_MAX_CANDIDATES", 40)
 
-    # Claude
+    # Which model writes the interpretation draft.
+    #   "local"  - a model served by Ollama on this machine; no case data leaves the network
+    #   "claude" - the Anthropic API; sends de-identified case data off-site, so it has to be
+    #              turned on deliberately and is only useful as a quality comparison
+    ai_backend: str = _env("WES_AI_BACKEND", "local")
+    ai_enabled: bool = _env("WES_AI_ENABLED", True)
+
+    # Local model (Ollama)
+    ollama_url: str = _env("WES_OLLAMA_URL", "http://127.0.0.1:11434")
+    ollama_model: str = _env("WES_OLLAMA_MODEL", "qwen3.5:4b")
+    ollama_timeout: int = _env("WES_OLLAMA_TIMEOUT", 1800)
+    # Context window to serve the model with. A whole case (40 candidates + clinical text)
+    # is roughly 16k tokens; too small a value makes Ollama silently drop the start of the
+    # prompt. Lower it if the GPU runs out of memory.
+    ollama_num_ctx: int = _env("WES_OLLAMA_NUM_CTX", 32768)
+    # Let the model reason before answering: better interpretation, noticeably slower
+    ollama_think: bool = _env("WES_OLLAMA_THINK", False)
+
+    # Claude (only used when ai_backend == "claude")
     anthropic_model: str = _env("WES_MODEL", "claude-opus-5-5")
     ai_effort: str = _env("WES_AI_EFFORT", "high")
-    ai_enabled: bool = _env("WES_AI_ENABLED", True)
 
     # Lab / report identity
     lab_name: str = _env("WES_LAB_NAME", "Anderson Diagnostics & Labs")

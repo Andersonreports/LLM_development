@@ -15,8 +15,10 @@
       {% endfor %}
       <div class="sys-row"><span>User login</span>
         {% if login_enabled %}<span class="flag flag-NEGATIVE">ENABLED</span>{% else %}<span class="flag flag-POSITIVE">DISABLED</span>{% endif %}</div>
-      <div class="sys-row"><span>AI assistant</span>
-        {% if ai %}<span class="flag flag-NEGATIVE">CONNECTED</span>{% else %}<span class="flag flag-INCONCLUSIVE">NOT CONFIGURED</span>{% endif %}</div>
+      <div class="sys-row"><span>AI interpretation<div class="xs muted">{{ ai_check.description }}{% if ai_check.backend == 'local' %} &middot; stays on this network{% else %} &middot; sends de-identified data off-site{% endif %}</div></span>
+        {% if ai_check.available %}<span class="flag flag-NEGATIVE">AVAILABLE</span>
+        {% elif not ai_check.enabled %}<span class="flag" style="color:var(--muted);border-color:var(--line)">DISABLED</span>
+        {% else %}<span class="flag flag-INCONCLUSIVE" title="{{ ai_check.hint }}">NOT REACHABLE</span>{% endif %}</div>
     </div>
   </div>
   <div class="card">
