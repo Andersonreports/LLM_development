@@ -20,3 +20,6 @@ bench/results/
 
 # editor/tool scratch files
 .Rhistory
+
+# generated demo data (rebuild with scripts/make_demo_data.py)
+demo/
