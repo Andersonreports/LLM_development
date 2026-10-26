@@ -1,8 +1,21 @@
 # LLM Learning Guide
 
-A plain-language guide to every concept used while building **tinygpt**, our language
-model built from scratch. Each section explains the idea, shows where it lives in our
-code, and uses real numbers from our own runs.
+A plain-language guide to every concept used in this project. Each section explains the
+idea, shows where it lives in our code, and uses real numbers from our own runs.
+
+**Two tracks run through this guide**, and it is worth keeping them apart:
+
+| | **tinygpt** (the learning track) | **Qwen 3.5 4B** (what ADVAT uses) |
+|---|---|---|
+| Where it came from | We built and trained it from scratch | Pretrained by Alibaba, downloaded free |
+| Size | 3-11 million parameters | 4 **billion** |
+| Trained on | 1 MB of Shakespeare | Trillions of words |
+| What it can do | Produce fluent, meaningless English | Read evidence and draft clinical text |
+| Why we have it | To understand how these models work | To do the job |
+| Folder | `llm/` | `AI-Analyser/wes/ai.py` |
+
+The same ideas apply to both: both are Transformers, both use tokenizers, both predict the
+next token. Building the small one is how we learned to judge the large one.
 
 This guide is updated after every completed step of the
 [ADVAT LLM roadmap](../ADVAT_LLM_Project_Roadmap.docx.pdf). See the
@@ -21,8 +34,10 @@ This guide is updated after every completed step of the
 9. [Writing text: generation and sampling](#9-writing-text-generation-and-sampling)
 10. [Data: where training text comes from](#10-data-where-training-text-comes-from)
 11. [Limits: what a small model can and cannot do](#11-limits-what-a-small-model-can-and-cannot-do)
-12. [Glossary](#12-glossary)
-13. [Progress log](#progress-log)
+12. [Using someone else's model: open weights, quantisation, serving](#11b-using-someone-elses-model-open-weights-quantisation-serving)
+13. [Benchmarking a model's clinical output](#11c-benchmarking-a-models-clinical-output)
+14. [Glossary](#12-glossary)
+15. [Progress log](#progress-log)
 
 ---
 
@@ -38,17 +53,19 @@ paragraph is just predicting the next piece, adding it, and predicting again.
 
 **What does "from scratch" mean?**
 The model starts with **random numbers** inside it. It knows nothing - not English, not
-spelling, not Shakespeare. Everything it ends up "knowing" comes from our training. We do
-not download or reuse anyone else's trained model.
+spelling, not Shakespeare. Everything it ends up "knowing" comes from our training. We did
+this for tinygpt. We did **not** do it for Qwen, which arrived already trained.
 
-**The four stages we follow**
+**The four stages**
 
-| Stage | What happens | Our file |
-|---|---|---|
-| 1. Tokenize | Turn text into numbers the model can process | `tinygpt/tokenizer.py` |
-| 2. Build | Define the neural network (the Transformer) | `tinygpt/model.py` |
-| 3. Train | Show it lots of text so it learns to predict the next token | `train.py` |
-| 4. Generate | Ask it to continue a prompt | `generate.py` |
+| Stage | What happens | tinygpt | Qwen in ADVAT |
+|---|---|---|---|
+| 1. Tokenize | Turn text into numbers | `tinygpt/tokenizer.py` (we wrote it) | built into the model |
+| 2. Build | Define the neural network | `tinygpt/model.py` (we wrote it) | Alibaba built it |
+| 3. Train | Learn to predict the next token | `train.py`, 15 min on our GPU | Alibaba did it, months of compute |
+| 4. Generate | Continue a prompt | `generate.py` | Ollama serves it |
+
+Stages 1-3 are where the cost is, and for Qwen someone else paid it. We use stage 4.
 
 **Important distinction (from the roadmap):** *training a language model* and *building an
 application that uses one* are separate jobs. A language model does not replace variant
@@ -103,6 +120,17 @@ marking where one document ends.
 
 *Our code:* `CharTokenizer` and `BPETokenizer` in `tinygpt/tokenizer.py`; both written
 from scratch.
+
+### What Qwen uses
+
+Qwen 3.5 has its own BPE tokenizer with a vocabulary of roughly 150,000 tokens, built into
+the model file. We never see it directly, but its size explains something useful: with a
+large vocabulary, a whole word like `"pathogenic"` is often one token, so a page of
+clinical text costs far fewer tokens than it would under our 65-character tokenizer.
+
+This matters in practice. Our annotated WES file is about 82 MB of text, roughly 20-25
+million tokens. Qwen can hold about 262,000 at once. That gap is why the pipeline must
+filter the data down before the model ever sees it.
 
 ---
 
@@ -200,6 +228,25 @@ This is literally what "from scratch" means.
 | `n_embd` | vector size per token ("width") | 384 |
 | `dropout` | fraction switched off during training | 0.2 |
 
+### The same design, at a different scale
+
+Qwen 3.5 4B is the **same kind of model** as tinygpt - a decoder-only Transformer with
+embeddings, causal self-attention, MLP blocks and a next-token output layer. The
+difference is size and training, not concept:
+
+| | tinygpt `small` | Qwen 3.5 4B |
+|---|---|---|
+| Parameters | 10.7 million | ~4 billion (370x more) |
+| Layers | 6 | ~36 |
+| Context window | 256 tokens | 262,144 tokens |
+| Vocabulary | 65 characters | ~150,000 sub-words |
+| Training data | 1 MB | trillions of words |
+
+Modern models add refinements (rotary position encoding instead of learned position
+embeddings, grouped-query attention, RMSNorm instead of LayerNorm, SwiGLU in the MLP).
+These are efficiency improvements to the same structure - worth knowing the names, not
+worth implementing to understand the idea.
+
 ---
 
 ## 4. How the model predicts: logits, probabilities, loss
@@ -254,6 +301,11 @@ One **training step** (also called an **iteration**):
 ```
 
 Our first run did **5,000** of these steps in 15.4 minutes.
+
+> **We do not do any of this for Qwen.** It arrives already trained. Everything in this
+> section describes work Alibaba did on thousands of GPUs over months. We only *use* the
+> result. The one kind of training we might do later is **fine-tuning** (section 11b):
+> a short extra run on our own signed reports to teach it our writing style.
 
 **Batch** - several text chunks processed together (we used **64 chunks of 256
 characters**). Larger batches give steadier learning but need more GPU memory.
@@ -445,6 +497,26 @@ memory. If you run out, reduce batch size or context first.
 **Device** - where a calculation runs: `"cuda"` (GPU) or `"cpu"`. Our tests run on CPU so
 they work on any machine; real training runs on the GPU.
 
+### Running a model vs training one
+
+Training needs far more memory than running, because it must also hold the gradients and
+the optimizer's bookkeeping. Running a trained model ("inference") only needs the weights
+plus the conversation:
+
+| | Training tinygpt (10.7M) | Running Qwen 4B |
+|---|---|---|
+| What is in memory | weights, gradients, optimizer state, activations | weights + context |
+| Memory used | 1.74 GB | ~3 GB at 4-bit, plus 1-2 GB for context |
+
+**CPU inference.** Without a GPU, the model runs in ordinary RAM on the processor. It
+works - Ollama falls back automatically - but generation is several times slower, so the
+machine needs ~12-16 GB of free RAM. This is the situation on our Linux server, which has
+no graphics card: a case takes 5-20 minutes there instead of 2-3 on the laptop GPU.
+
+**Why we turn off "thinking mode" on CPU.** Letting the model reason before answering
+produces several times more text, so on a CPU-only machine a case goes from minutes to an
+hour. We turn it off there and rely on the code guardrail instead (section 11c).
+
 ---
 
 ## 9. Writing text: generation and sampling
@@ -499,6 +571,11 @@ number exaggerates differences; dividing by a large number flattens them.
 **For clinical use** (report drafts, explanations) use **low temperature or 0**: the same
 input should give the same, most-likely wording. Randomness is unwanted in a report.
 
+**This is what ADVAT actually does.** In `wes/ai.py` the local model is called with
+`"temperature": 0`, so the same case always produces the same draft. That matters for an
+accredited lab: a result that changes between runs cannot be audited, and a reviewer who
+re-runs a case should see what they saw before.
+
 ### Top-k and top-p
 
 Extra filters applied before the dice roll:
@@ -548,9 +625,31 @@ licence-clean genomics text.
 
 **Patient data** is never used for training at this stage (roadmap section 8).
 
+### Where Qwen's knowledge came from, and why that matters
+
+We did not choose Qwen's training data and cannot inspect it. Alibaba trained it on a very
+large mixture of public text that certainly included medical material, but not in any
+curated or verified way.
+
+That has a direct consequence we measured: the model "knows" clinical genetics
+approximately, and some of what it knows is wrong. It stated that Dravet syndrome is
+autosomal recessive, which is wrong, **even though our data told it otherwise**.
+
+This is why the architecture puts facts in the pipeline, not in the model:
+
+| Kind of information | Where it comes from | Why |
+|---|---|---|
+| Gene, frequency, ClinVar, predictions | Our databases, looked up per variant | Verifiable, versioned, current |
+| ACMG criteria and points | Our code | Deterministic, auditable |
+| Phrasing, structure, narrative | The model | What it is genuinely good at |
+
+A model's own recollection is never the source of a fact in a report.
+
 ---
 
 ## 11. Limits: what a small model can and cannot do
+
+### tinygpt (10.7 million parameters)
 
 What our 10.7M-parameter model learned from 1 MB of text:
 - spelling of real words
@@ -570,6 +669,31 @@ remain responsible.
 **Why we can't just make it bigger on this laptop:** useful general-purpose LLMs need
 billions of parameters and hundreds of billions of tokens of text - far beyond 6 GB of
 VRAM. Scaling is not just changing one setting.
+
+### Qwen 3.5 4B (4 billion parameters)
+
+Four hundred times larger, and the difference is real. On our clinical benchmark it chose
+the correct result flag and the correct reportable variants in all four cases, and wrote
+usable report prose.
+
+But it still has a knowledge ceiling. In one case it wrote that Dravet syndrome is
+autosomal recessive - a textbook error - and repeated it under four different
+configurations. The correct answer was in its input.
+
+| | tinygpt | Qwen 3.5 4B | What would fix the gap |
+|---|---|---|---|
+| Fluent English | yes | yes | - |
+| Follows instructions | no | yes | - |
+| Picks the right variant | no | yes | - |
+| Reliable clinical facts | no | **no** | a larger model (9B, 27B) |
+
+**The lesson scales.** "Fluent output is not proof of correctness" was obvious with
+tinygpt, because its output was nonsense. With Qwen it is *harder* to see, because the
+wrong statement is embedded in otherwise sound, confident, well-written text. A bigger
+model does not remove the need for review; it makes review harder and more important.
+
+In ADVAT a language model must never classify a variant or make clinical statements on
+its own. Validated tools and qualified review remain responsible.
 
 ---
 
@@ -687,6 +811,7 @@ produces confident, wrong verdicts - the same failure it is meant to detect.
 | Context window | How many previous tokens the model can see (`block_size`) |
 | Corpus | Collection of training text |
 | Cross-entropy | Standard loss: penalises low probability on the correct next token |
+| CPU inference | Running a model on the processor instead of a GPU: works, several times slower |
 | CUDA | NVIDIA software for running calculations on the GPU |
 | Data leakage | Validation/test data accidentally influencing training |
 | Dropout | Randomly disabling values during training to reduce memorisation |
@@ -709,6 +834,7 @@ produces confident, wrong verdicts - the same failure it is meant to detect.
 | Harness | The machinery that runs a test, independent of what is tested |
 | LoRA / QLoRA | Cheap fine-tuning: train small add-on layers, optionally over a 4-bit model |
 | Model capacity | How much a model can memorise; roughly its parameter count |
+| Ollama | The program that loads a model and answers requests on our own machine |
 | Open-weight model | A model whose trained parameters are published for anyone to run |
 | Noise (run-to-run variance) | Differences between runs caused only by randomness |
 | Overfitting | Better on training data, worse on new data: memorising |
@@ -726,6 +852,7 @@ produces confident, wrong verdicts - the same failure it is meant to detect.
 | Tokenizer | Converts text to token IDs and back |
 | Top-k / top-p | Sampling filters limiting which tokens may be picked |
 | Training / validation / test set | Data to learn from / to check generalisation / for the final score |
+| Thinking mode | The model reasons privately before answering: better output, much slower |
 | Transformer | Neural-network design built from attention and feed-forward layers |
 | Validation loss | Loss on held-out text; tells us whether the model generalises |
 | Vocabulary | All tokens the tokenizer can produce |
@@ -743,5 +870,6 @@ produces confident, wrong verdicts - the same failure it is meant to detect.
 | 2026-10-23 | Phase 2 - architecture | Character and BPE tokenizers; GPT-style Transformer with random initialisation; 14 tests | Tokens, tokenizers, embeddings, attention, causal mask, blocks, parameters, logits, loss |
 | 2026-10-23 | Phase 3 - training | Tiny Shakespeare prepared (65-char vocab, 90/10 split); `small` model trained 5,000 steps in 15.4 min; best val loss 1.47 at step 1,750, then overfitting | Training loop, batch, gradient, backprop, AdamW, learning-rate schedule, validation, overfitting, early stopping, checkpoints, perplexity, provenance |
 | 2026-10-23 | Phase 4 - generation (started) | `generate.py`; temperature, top-k, top-p, seed demonstrated on the trained model | Autoregressive generation, sampling, temperature, top-k, top-p, seed, greedy decoding |
+| 2026-10-26 | Guide revised end to end | Every section now covers both tracks: how tinygpt taught the concept, and how Qwen applies it in ADVAT. Added Qwen's tokenizer and scale, running vs training memory, CPU inference, temperature 0 for clinical use, where Qwen's knowledge came from, and its measured limits | CPU inference, thinking mode, Ollama, rotary/grouped-query attention (named), inference vs training memory |
 | 2026-10-26 | Direction change - open-weight model instead of from-scratch | Installed Ollama + qwen3.5:4b; added a backend adapter to AI-Analyser (local by default, Claude opt-in); built a 4-case clinical benchmark. Score 19/20; one persistent factual error on a textbook gene | Open weights, licences, quantisation, LoRA/QLoRA, local serving, constrained generation, thinking mode, clinical benchmarking, harness, guardrails vs instructions |
 | 2026-10-23 | Phase 4 - evaluation & overfitting | Added locked test set (90/5/5 split) and exact `evaluate.py`; ran 3 controlled experiments. Smaller model (3.2M) won: val 1.369, test 1.525 vs baseline 1.390 / 1.563, in 6 min | Test set, hyperparameter, baseline, controlled experiment/ablation, model capacity, sampled vs exact evaluation, run-to-run noise |
