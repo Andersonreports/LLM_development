@@ -265,6 +265,19 @@ How to work:
 Use only the variant_key values provided. Write in British/Indian clinical English with HGVS nomenclature as given."""
 
 
+# Appended when WES_AI_STRICT_PROMPT is on. Small models tend to answer from memory and
+# contradict the case data; these rules make the supplied evidence authoritative.
+STRICT_RULES = """
+
+DATA DISCIPLINE - the supplied case data outranks your own recollection:
+- Each candidate's "gene" field gives the gene's diseases and their inheritance. Use those. Never state an inheritance pattern that contradicts them, and never describe a gene as recessive when the supplied inheritance says AD, or vice versa.
+- Every variant_key starts with its chromosome: "2-166848646-C-T:SCN1A" is on chromosome 2. Only variants on chromosome X or Y are sex-linked. Never invoke X-inactivation, hemizygosity or X-linked inheritance for an autosomal variant.
+- Never contradict a supplied allele frequency, ClinVar entry, zygosity, segregation model or QC value, and never invent one that is not supplied.
+- criteria_removed: only when a supplied field directly contradicts the criterion, and name that field in the reason. Removals are NOT applied automatically; they are shown to the reviewer for confirmation, so an unjustified removal only creates work.
+- If the supplied evidence is insufficient to decide something, say so in reviewer_attention. Do not fill the gap with a guessed mechanism.
+- Keep flag_rationale under 80 words. Put uncertainty in reviewer_attention, not in long speculative prose."""
+
+
 def extract_phenotype(clinical_text: str, age: str | None, sex: str | None,
                       identifiers: list[str]) -> tuple[PhenotypeOut, dict]:
     text = scrub(clinical_text, identifiers)
@@ -313,7 +326,8 @@ def interpret(context: dict) -> tuple[InterpretationOut, dict]:
         payload["carrier_candidates"] = [_compact_variant(v) for v in context["carrier"]]
     user = ("Interpret this exome case and return the structured result.\n\n<case>\n"
             + json.dumps(payload, indent=1, default=str) + "\n</case>")
-    return _call(INTERP_SYSTEM, user, InterpretationOut, effort=settings.ai_effort)
+    system = INTERP_SYSTEM + (STRICT_RULES if settings.ai_strict_prompt else "")
+    return _call(system, user, InterpretationOut, effort=settings.ai_effort)
 
 
 def check() -> dict:

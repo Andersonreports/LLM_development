@@ -78,6 +78,13 @@ class Settings:
     #              turned on deliberately and is only useful as a quality comparison
     ai_backend: str = _env("WES_AI_BACKEND", "local")
     ai_enabled: bool = _env("WES_AI_ENABLED", True)
+    # Apply criteria the model asks to REMOVE. Off by default: deleting an automatically
+    # derived criterion (e.g. PVS1 on a null variant in a haploinsufficiency gene) can
+    # silently downgrade a real finding, so removals are shown to the reviewer instead
+    ai_allow_criteria_removal: bool = _env("WES_AI_ALLOW_CRITERIA_REMOVAL", False)
+    # Append explicit data-discipline rules to the interpretation prompt. Needed by small
+    # local models, harmless for large ones
+    ai_strict_prompt: bool = _env("WES_AI_STRICT_PROMPT", True)
 
     # Local model (Ollama)
     ollama_url: str = _env("WES_OLLAMA_URL", "http://127.0.0.1:11434")

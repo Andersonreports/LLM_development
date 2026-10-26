@@ -132,6 +132,58 @@ automatically. Both need licence registration, so they are not downloaded by the
 | `WES_LAB_NAME`, `WES_LAB_ADDRESS`, `WES_LAB_ACCREDITATION`, `WES_REPORT_METHODOLOGY` | | Report header and methods text |
 | `WES_USERS` | – | `user:pass,user2:pass2` for basic auth |
 
+## Interpretation model
+
+The AI draft is written by a **local model by default** (`WES_AI_BACKEND=local`): Ollama
+serving `qwen3.5:4b`, so no case data leaves the network. `WES_AI_BACKEND=claude` switches
+to the Anthropic API, which sends de-identified data off-site and must be enabled
+deliberately. Both backends get identical prompts and must return the same schema; whatever
+they propose is re-scored by `wes/acmg.py` and shown to the reviewer.
+
+```bash
+ollama pull qwen3.5:4b          # once
+```
+
+Two safeguards, both on by default:
+- `WES_AI_ALLOW_CRITERIA_REMOVAL=false` - the model cannot delete an ACMG criterion the
+  engine derived; removals become reviewer-attention notes instead.
+- `WES_AI_STRICT_PROMPT=true` - adds rules making the supplied case data authoritative
+  (the chromosome is in the variant key; never contradict supplied inheritance or
+  frequencies; flag uncertainty rather than guessing).
+
+### Benchmark
+
+`bench/` holds four synthetic cases with known-correct answers (no patient data, so they
+live in git) and five automated checks each: correct flag, correct variants in the primary
+section, no criteria deleted, stated classification consistent with its own criteria, and
+no fabricated claims. Run `python -m bench.run`; results land in `bench/results/`.
+
+**qwen3.5:4b, thinking on, strict prompt on (2026-10-26): 19/20**
+
+| Case | Score | Time | Failure |
+|---|---|---|---|
+| dominant_de_novo (SCN1A, *de novo*) | 4/5 | 222 s | states Dravet syndrome is autosomal recessive (it is dominant) although the supplied data says AD |
+| recessive_comphet (PAH, in trans) | 5/5 | 199 s | - |
+| negative | 5/5 | 149 s | - |
+| vus_inconclusive (MYH7) | 5/5 | 271 s | - |
+
+Settings sweep on the SCN1A case (same model, one change at a time):
+
+| Thinking | Strict prompt | Score | Time | Tried to delete criteria |
+|---|---|---|---|---|
+| off | off | 3/5 | 42 s | PM2, PP3 |
+| **on** | off | 4/5 | 207 s | none |
+| off | **on** | 3/5 | 41 s | PVS1 |
+| **on** | **on** | 4/5 | 224 s | none |
+
+Thinking mode is what stops the model deleting evidence; it costs roughly 5x the time. The
+strict prompt did not stop deletion on its own, but it changed the remaining error from
+acting on a false belief to flagging it for the reviewer.
+
+**Not yet validated for clinical use.** Four synthetic cases can show a model is broken;
+they cannot show it is good. Before clinical use, add real signed-off cases (kept out of
+git) and have scientists compare drafts.
+
 ## Known limitations
 
 - SNVs and small indels from the VCF only. No CNV, repeat-expansion or mitochondrial-heteroplasmy

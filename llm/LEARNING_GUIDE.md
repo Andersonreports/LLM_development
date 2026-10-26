@@ -573,6 +573,99 @@ VRAM. Scaling is not just changing one setting.
 
 ---
 
+## 11b. Using someone else's model: open weights, quantisation, serving
+
+Everything above was about building a model from scratch. The ADVAT tool takes the other
+route: start from a model someone else already pretrained. The concepts carry over, with a
+few new ones.
+
+**Open-weight model** - a model whose trained parameters are published for anyone to
+download and run. Examples: Qwen, Gemma, Llama, Phi, Mistral. "Open weights" is not the
+same as "open source": the weights are given, the training data usually is not.
+
+**Licence** matters for a commercial lab. Apache 2.0 and MIT allow commercial use freely.
+Others (Meta's Llama community licence, Google's health-model terms) add conditions that
+need reading before clinical use.
+
+**Pretrained vs fine-tuned.** Pretraining is the expensive stage someone else already paid
+for (trillions of tokens, large GPU clusters). **Fine-tuning** continues training on your
+own examples to teach style and task-specific behaviour. Fine-tuning teaches *how to
+answer*, not *new facts* - a crucial limit.
+
+**Quantisation** - storing each parameter in fewer bits so the model fits in less memory.
+
+| Precision | Qwen3.5 4B size | Fits our 6 GB GPU? |
+|---|---|---|
+| bf16 (16-bit) | ~8 GB | no |
+| 8-bit | ~4.5 GB | tight |
+| **4-bit** | **~3 GB** | yes |
+
+Quality drops slightly with heavier quantisation; 4-bit is the usual sweet spot for
+running locally.
+
+**LoRA / QLoRA** - ways to fine-tune cheaply. LoRA freezes the original weights and trains
+small add-on layers (about 1% of the parameters). QLoRA also keeps the frozen model in
+4-bit. Together they make fine-tuning possible on a laptop GPU.
+
+**Serving / inference server** - a program that loads the model and answers requests over
+a local API. We use **Ollama** (`http://127.0.0.1:11434`). Others: llama.cpp, vLLM.
+
+**Local vs API.** A local model runs on your own hardware, so no data leaves the network
+and there is no per-question cost. An API model is stronger but sends data to a third
+party. For patient data that difference is the whole decision.
+
+**Structured output / constrained generation** - forcing the model to emit JSON matching a
+fixed schema. Ollama takes the schema in its `format` field and restricts generation to
+valid output, so the answer can be parsed reliably instead of hoping the model formats it
+correctly.
+
+**Thinking mode** - the model writes a private reasoning chain before its answer. In our
+tests this was the single change that stopped the model deleting evidence it should have
+kept, at roughly 5x the time.
+
+**Context window in practice.** Our WES VCF has 480,290 variants (~20 million tokens);
+Qwen3.5 4B holds 262,144. Raw data cannot go into a model - the pipeline filters to ~40
+candidates first, which is a few thousand tokens. This is why the architecture is *tools
+first, model last*.
+
+## 11c. Benchmarking a model's clinical output
+
+The same idea as a **test set**, applied to the finished answer rather than to language
+quality. The lab analogy is **proficiency testing**: run samples whose answers you already
+know, and check the assay gets them right.
+
+Our benchmark (`AI-Analyser/bench/`): four synthetic cases built from textbook genetics
+(so they contain no patient data and can live in git), each scored on five checks -
+correct result flag, correct variants in the primary section, no ACMG criteria deleted,
+stated classification consistent with its own criteria, and no fabricated claims.
+
+**Harness** - the machinery that runs the test, kept separate from what is tested. Ours
+calls `ai.interpret()`, so swapping Qwen for Gemma or Claude is one environment variable
+and the scores stay comparable.
+
+**What we learned running it (2026-10-26, qwen3.5:4b, 19/20):**
+
+- The model reliably got the **decisions** right: correct flag and correct reported
+  variants in all four cases.
+- It was **confidently wrong about a textbook fact** in one case, calling Dravet syndrome
+  autosomal recessive when the supplied data said dominant. The correct answer was in the
+  prompt and the model overrode it. This is a knowledge limit of a 4-billion-parameter
+  model, and no prompt fixed it.
+- **Guardrails beat instructions.** Asking the model not to delete criteria did not work;
+  blocking deletion in code did.
+
+**Two mistakes I made in the benchmark itself, both instructive:**
+
+1. The cases hard-coded ACMG point totals, and one was wrong. Fixed by computing them with
+   the real scoring engine, so a case can never disagree with itself.
+2. The "no fabricated claims" check matched plain keywords, so it failed the model for
+   writing *"precludes a definitive diagnosis"* - the correct thing to say about a VUS.
+   Fixed with a **negation guard**, exactly as `wes/phenotype.py` already does for clinical
+   text. Real score: 19/20, not 18/20.
+
+Lesson: **a benchmark needs the same testing as the product code.** An unchecked benchmark
+produces confident, wrong verdicts - the same failure it is meant to detect.
+
 ## 12. Glossary
 
 | Term | Meaning |
@@ -584,6 +677,8 @@ VRAM. Scaling is not just changing one setting.
 | Ablation / controlled experiment | Changing one setting at a time to see its effect |
 | Backpropagation | Computing how each parameter contributed to the error |
 | Baseline | Reference result that new ideas are compared against |
+| Benchmark | Fixed cases with known answers, used to measure a model objectively |
+| Constrained generation | Forcing output to match a schema (e.g. valid JSON) |
 | Batch | Group of text chunks processed together in one step |
 | bf16 | 16-bit number format that saves memory with little accuracy loss |
 | BPE | Byte Pair Encoding: tokenizer that merges frequent pairs into sub-word tokens |
@@ -611,7 +706,10 @@ VRAM. Scaling is not just changing one setting.
 | Logits | Raw scores for each possible next token |
 | Loss | Number measuring prediction error (lower is better) |
 | MLP | Small feed-forward network inside each block |
+| Harness | The machinery that runs a test, independent of what is tested |
+| LoRA / QLoRA | Cheap fine-tuning: train small add-on layers, optionally over a 4-bit model |
 | Model capacity | How much a model can memorise; roughly its parameter count |
+| Open-weight model | A model whose trained parameters are published for anyone to run |
 | Noise (run-to-run variance) | Differences between runs caused only by randomness |
 | Overfitting | Better on training data, worse on new data: memorising |
 | Parameters / weights | The learned numbers inside the model |
@@ -619,6 +717,7 @@ VRAM. Scaling is not just changing one setting.
 | Position embedding | Vector telling the model where a token sits in the sequence |
 | Prompt | Starting text given to the model |
 | Provenance | Record of where data came from and how it was processed |
+| Quantisation | Storing parameters in fewer bits so a model fits in less memory |
 | Residual connection | Adding a layer's output to its input (`x + f(x)`) |
 | Seed | Starting number that makes "random" choices repeatable |
 | Softmax | Turns logits into probabilities that sum to 100% |
@@ -644,4 +743,5 @@ VRAM. Scaling is not just changing one setting.
 | 2026-10-23 | Phase 2 - architecture | Character and BPE tokenizers; GPT-style Transformer with random initialisation; 14 tests | Tokens, tokenizers, embeddings, attention, causal mask, blocks, parameters, logits, loss |
 | 2026-10-23 | Phase 3 - training | Tiny Shakespeare prepared (65-char vocab, 90/10 split); `small` model trained 5,000 steps in 15.4 min; best val loss 1.47 at step 1,750, then overfitting | Training loop, batch, gradient, backprop, AdamW, learning-rate schedule, validation, overfitting, early stopping, checkpoints, perplexity, provenance |
 | 2026-10-23 | Phase 4 - generation (started) | `generate.py`; temperature, top-k, top-p, seed demonstrated on the trained model | Autoregressive generation, sampling, temperature, top-k, top-p, seed, greedy decoding |
+| 2026-10-26 | Direction change - open-weight model instead of from-scratch | Installed Ollama + qwen3.5:4b; added a backend adapter to AI-Analyser (local by default, Claude opt-in); built a 4-case clinical benchmark. Score 19/20; one persistent factual error on a textbook gene | Open weights, licences, quantisation, LoRA/QLoRA, local serving, constrained generation, thinking mode, clinical benchmarking, harness, guardrails vs instructions |
 | 2026-10-23 | Phase 4 - evaluation & overfitting | Added locked test set (90/5/5 split) and exact `evaluate.py`; ran 3 controlled experiments. Smaller model (3.2M) won: val 1.369, test 1.525 vs baseline 1.390 / 1.563, in 6 min | Test set, hyperparameter, baseline, controlled experiment/ablation, model capacity, sampled vs exact evaluation, run-to-run noise |

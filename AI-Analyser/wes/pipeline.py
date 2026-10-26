@@ -323,6 +323,14 @@ def _run_ai(db, case: Case) -> None:
             attention.append(f"AI referenced unknown variant key {f['variant_key']} - ignored")
             continue
         removed = set(f["criteria_removed"])
+        if removed and not settings.ai_allow_criteria_removal:
+            # removing an auto criterion can silently downgrade a real finding, so the
+            # suggestion goes to the reviewer and the computed criteria stand
+            attention.append(
+                f"{v['gene']} {v.get('hgvsc') or v.get('variant_id')}: AI suggested removing "
+                f"{', '.join(sorted(removed))} - NOT applied. Check its reasoning and remove the "
+                "criterion manually only if the evidence really contradicts it")
+            removed = set()
         crit = [c for c in v["acmg"]["criteria"] if c["code"] not in removed]
         existing = {c["code"] for c in crit}
         for c in f["criteria_added"]:
