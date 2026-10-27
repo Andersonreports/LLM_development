@@ -76,6 +76,11 @@ def test_each_check_catches_its_own_failure():
     ("This does not provide a definitive diagnosis.", []),
     ("The gene is autosomal dominant, not autosomal recessive.", []),
     ("Unlike autosomal recessive disease, a single allele suffices here.", []),
+    # the negation can follow the phrase, or use a form the first pattern list missed
+    ("A definitive diagnosis cannot be established from this finding.", []),
+    ("The findings suggest a contribution but do not establish a definitive diagnosis.", []),
+    ("A definitive diagnosis could not be reached.", []),
+    ("This is not a definitive diagnosis.", []),
     # negation in an earlier sentence must not clear a later assertion
     ("No family history was reported. The gene is autosomal recessive.", ["autosomal recessive"]),
 ])

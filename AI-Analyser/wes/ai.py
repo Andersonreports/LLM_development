@@ -21,7 +21,7 @@ import re
 from typing import Literal, Optional
 
 import httpx
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import settings
 
@@ -45,14 +45,18 @@ class HpoTermOut(_Strict):
     excluded: bool
 
 
+# Every list is capped. An unbounded list in the schema gives a small model no reason to
+# stop: on a real case it emitted HPO terms until it exhausted the whole token budget.
+# The cap becomes "maxItems" in the JSON Schema, which constrains generation itself, so
+# the model cannot run away rather than merely being asked not to.
 class PhenotypeOut(_Strict):
     summary: str
-    hpo_terms: list[HpoTermOut]
+    hpo_terms: list[HpoTermOut] = Field(max_length=40)
     age_of_onset: Optional[str]
     consanguinity: Optional[bool]
     family_history: Optional[str]
-    suspected_conditions: list[str]
-    suspected_genes: list[str]
+    suspected_conditions: list[str] = Field(max_length=10)
+    suspected_genes: list[str] = Field(max_length=20)
 
 
 class Criterion(_Strict):
@@ -65,8 +69,8 @@ class Finding(_Strict):
     variant_key: str
     report_section: Literal["primary", "vus", "secondary", "carrier", "not_reported"]
     classification: Literal["Pathogenic", "Likely pathogenic", "Uncertain significance", "Likely benign", "Benign"]
-    criteria_added: list[Criterion]
-    criteria_removed: list[str]
+    criteria_added: list[Criterion] = Field(max_length=8)
+    criteria_removed: list[str] = Field(max_length=8)
     disease: str
     disease_inheritance: str
     phenotype_fit: Literal["strong", "partial", "weak", "not_applicable"]
@@ -77,12 +81,12 @@ class InterpretationOut(_Strict):
     result_flag: Literal["POSITIVE", "INCONCLUSIVE", "NEGATIVE", "CARRIER"]
     flag_rationale: str
     summary_line: str
-    findings: list[Finding]
-    excluded_candidates: list[str]
+    findings: list[Finding] = Field(max_length=25)
+    excluded_candidates: list[str] = Field(max_length=60)
     clinical_interpretation: str
-    recommendations: list[str]
-    limitations: list[str]
-    reviewer_attention: list[str]
+    recommendations: list[str] = Field(max_length=12)
+    limitations: list[str] = Field(max_length=12)
+    reviewer_attention: list[str] = Field(max_length=25)
 
 
 # ------------------------------------------------------------------ backends
@@ -111,6 +115,17 @@ def available() -> bool:
     want = settings.ollama_model
     # a tag without a version matches "name:latest"
     return want in names or f"{want}:latest" in names or any(n.split(":")[0] == want for n in names)
+
+
+# Output caps. A small model can fall into a repetition loop and generate until it runs
+# out of room: with the old 16k/32k caps that wasted 10 minutes per call before failing.
+# These are comfortably above what a real answer needs, so a runaway fails in about a
+# minute and the case falls back to the rule-based draft instead of stalling.
+MAX_TOKENS_PHENOTYPE = 3000      # a summary plus ~20 HPO terms
+MAX_TOKENS_INTERPRET = 8000      # findings, interpretation, recommendations, limitations
+# Characters per token for the case JSON, measured from a prompt that overflowed: dense
+# identifiers and numbers tokenise far worse than the ~4 of ordinary English.
+CHARS_PER_TOKEN = 2.0
 
 
 def _call(system: str, user: str, schema: type[BaseModel], effort: str, max_tokens: int = 32000):
@@ -145,7 +160,10 @@ def _call_ollama(system: str, user: str, schema: type[BaseModel], max_tokens: in
 
     data = resp.json()
     if data.get("done_reason") == "length":
-        raise AIError("Local model response truncated - reduce WES_AI_MAX_CANDIDATES or raise WES_OLLAMA_NUM_CTX")
+        # nearly always the model repeating itself rather than a genuinely long answer
+        raise AIError(f"Local model did not stop: it produced the full {max_tokens}-token budget "
+                      f"({data.get('eval_count')} tokens) without finishing. This is usually the model "
+                      "looping. Try a larger model, or raise WES_OLLAMA_NUM_CTX if the case is unusually big")
     content = (data.get("message") or {}).get("content") or ""
     if not content.strip():
         raise AIError("Local model returned an empty response")
@@ -292,7 +310,7 @@ def extract_phenotype(clinical_text: str, age: str | None, sex: str | None,
     text = scrub(clinical_text, identifiers)
     user = (f"Patient age: {age or 'not stated'}\nSex: {sex or 'not stated'}\n\n"
             f"Clinical history:\n<clinical_history>\n{text}\n</clinical_history>")
-    return _call(PHENO_SYSTEM, user, PhenotypeOut, effort="medium", max_tokens=16000)
+    return _call(PHENO_SYSTEM, user, PhenotypeOut, effort="medium", max_tokens=MAX_TOKENS_PHENOTYPE)
 
 
 _VARIANT_FIELDS = [
@@ -303,17 +321,48 @@ _VARIANT_FIELDS = [
 ]
 
 
+# A match at low information content is not evidence: every human phenotype is a
+# "Phenotypic abnormality", so pairs like "Anaemia ~ Phenotypic abnormality" (ic 0.0) say
+# nothing. They also cost tokens and read to the model as supporting evidence.
+MIN_MATCH_IC = 0.5
+
+
 def _compact_variant(v: dict) -> dict:
     d = {k: v.get(k) for k in _VARIANT_FIELDS if v.get(k) not in (None, [], "", {})}
     d["genotype_quality"] = {r: {"dp": g.get("dp"), "gq": g.get("gq"), "ab": round(g["ab"], 2) if g.get("ab") is not None else None}
                              for r, g in v.get("genotypes", {}).items()}
     gi = v.get("gene_info") or {}
-    d["gene"] = {"symbol": v["gene"], "diseases": gi.get("diseases", [])[:5],
+    d["gene"] = {"symbol": v["gene"], "diseases": gi.get("diseases", [])[:3],
                  "loeuf": gi.get("loeuf"), "clingen_hi": gi.get("clingen_hi")}
-    d["phenotype_matches"] = [f"{m['patient_name']} ~ {m['match_name']}" for m in (v.get("phenotype_matches") or [])[:6]]
+    matches = [m for m in (v.get("phenotype_matches") or []) if (m.get("ic") or 0) >= MIN_MATCH_IC]
+    d["phenotype_matches"] = [f"{m['patient_name']} ~ {m['match_name']}" for m in matches[:3]]
     d["acmg_auto"] = {"criteria": [f"{c['code']}_{c['strength']}: {c['reason']}" for c in v["acmg"]["criteria"]],
                       "points": v["acmg"]["points"], "classification": v["acmg"]["classification"]}
     return d
+
+
+def _fit_candidates(payload: dict, candidates: list[dict], system_chars: int) -> list[dict]:
+    """Drop the lowest-ranked candidates until the prompt fits the context window.
+
+    The window holds the prompt AND the answer. Overflow is silent: Ollama truncates the
+    start of the prompt and the model then answers from a case it only half received.
+
+    CHARS_PER_TOKEN is measured, not guessed. A case whose prompt was budgeted at 2.5
+    still overflowed: the model got 5,557 tokens into its answer before input+output hit
+    32,768, which puts this payload at roughly 2.0 characters per token. Variant JSON is
+    dense with identifiers, numbers and punctuation, all of which tokenise badly compared
+    with the ~4 characters per token of ordinary English."""
+    budget_chars = int(settings.ollama_num_ctx * CHARS_PER_TOKEN) - system_chars - MAX_TOKENS_INTERPRET * CHARS_PER_TOKEN
+    kept = list(candidates)
+    while kept:
+        payload["candidates"] = [_compact_variant(v) for v in kept]
+        if len(json.dumps(payload, default=str)) <= budget_chars or len(kept) <= 5:
+            break
+        kept = kept[:-max(1, len(kept) // 10)]       # shave the weakest ~10% and retry
+    if len(kept) < len(candidates):
+        log.info("prompt too large for the context window: sent %d of %d candidates",
+                 len(kept), len(candidates))
+    return kept
 
 
 def interpret(context: dict) -> tuple[InterpretationOut, dict]:
@@ -322,7 +371,7 @@ def interpret(context: dict) -> tuple[InterpretationOut, dict]:
         "clinical": context["clinical"],
         "qc": context["qc"],
         "rule_based_flag": context["rule_flag"],
-        "candidates": [_compact_variant(v) for v in context["candidates"]],
+        "candidates": [],
     }
     if context.get("couple"):
         payload["couple_carrier_summary"] = {
@@ -333,10 +382,13 @@ def interpret(context: dict) -> tuple[InterpretationOut, dict]:
         payload["secondary_findings_candidates"] = [_compact_variant(v) for v in context["secondary"]]
     if context.get("carrier"):
         payload["carrier_candidates"] = [_compact_variant(v) for v in context["carrier"]]
+    system = INTERP_SYSTEM + (STRICT_RULES if settings.ai_strict_prompt else "")
+    # fill candidates last: the fit check needs the rest of the payload already in place
+    _fit_candidates(payload, context["candidates"], len(system))
     user = ("Interpret this exome case and return the structured result.\n\n<case>\n"
             + json.dumps(payload, indent=1, default=str) + "\n</case>")
-    system = INTERP_SYSTEM + (STRICT_RULES if settings.ai_strict_prompt else "")
-    return _call(system, user, InterpretationOut, effort=settings.ai_effort)
+    return _call(system, user, InterpretationOut, effort=settings.ai_effort,
+                 max_tokens=MAX_TOKENS_INTERPRET)
 
 
 def check() -> dict:

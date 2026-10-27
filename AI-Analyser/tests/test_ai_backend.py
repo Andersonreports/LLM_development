@@ -52,7 +52,7 @@ def test_local_backend_parses_and_reports_usage(local, monkeypatch):
     ({"message": {"content": "not json"}}, 200, "valid JSON"),
     ({"message": {"content": json.dumps({"flag": "X"})}}, 200, "did not match"),
     ({"message": {"content": ""}}, 200, "empty"),
-    ({"message": {"content": "{}"}, "done_reason": "length"}, 200, "truncated"),
+    ({"message": {"content": "{}"}, "done_reason": "length", "eval_count": 8000}, 200, "did not stop"),
     ({"error": "model not found"}, 404, "ollama pull"),
     ({"error": "boom"}, 500, "500"),
 ])

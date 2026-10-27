@@ -165,16 +165,19 @@ live in git) and five automated checks each: correct flag, correct variants in t
 section, no criteria deleted, stated classification consistent with its own criteria, and
 no fabricated claims. Run `python -m bench.run`; results land in `bench/results/`.
 
-**qwen3.5:4b, thinking off, strict prompt on (2026-10-26): 20/20 in 109 s**
+**Both local models now score full marks (2026-10-27), thinking off, strict prompt on:**
 
-| Case | Score | Time |
-|---|---|---|
-| dominant_de_novo (SCN1A, *de novo*) | 5/5 | 30 s |
-| recessive_comphet (PAH, in trans) | 5/5 | 28 s |
-| negative | 5/5 | 25 s |
-| vus_inconclusive (MYH7) | 5/5 | 26 s |
+| Model | Score | Total time | On your GPU |
+|---|---|---|---|
+| qwen3.5:**4b** | **20/20** | **109 s** | 88% GPU |
+| qwen3.5:**9b** | **20/20** | 411 s | 41% GPU, rest on CPU |
 
-How it got there, measured one change at a time:
+**The benchmark is saturated**: four cases can no longer tell a 4B from a 9B. That is a
+statement about the test, not about the models. Until harder or real cases are added, it
+can only show that neither model makes the specific errors it was built to catch - so
+there is currently no measured reason to prefer the larger, 3.8x slower model.
+
+How the 4B got there, measured one change at a time:
 
 | Configuration | Score | Time/case |
 |---|---|---|
@@ -200,6 +203,26 @@ specific failures are fixed; they cannot show the tool is right in general.
 That real case is also where the current limits were found. Before clinical use: add more
 signed-off cases (patient data - keep them out of git), and have scientists compare drafts
 against what they actually issued.
+
+### Keeping the prompt inside the context window
+
+The context window holds the prompt **and** the answer. Overflow is silent - Ollama
+truncates the start of the prompt and the model answers from a case it only half received,
+then usually loops until it exhausts its token budget. Three defences:
+
+- `ai._fit_candidates` drops the weakest candidates until the prompt provably fits.
+  `CHARS_PER_TOKEN = 2.0` is measured, not guessed: a prompt budgeted at 2.5 still
+  overflowed, with the model 5,557 tokens into its answer when input+output hit 32,768.
+- Every list in the output schemas is capped (`maxItems`), so generation is constrained
+  rather than merely requested. Without a cap the model emitted HPO terms until the whole
+  budget was gone and the phenotype step failed after nearly 10 minutes.
+- Output caps are modest (3,000 phenotype / 8,000 interpretation), so a loop fails in
+  about a minute instead of ten.
+
+Uninformative phenotype matches are also left out of the prompt. A pair such as
+"Anaemia ~ Phenotypic abnormality" has information content 0.0 - it says only that both
+are medical findings - yet it cost about a quarter of the candidate payload and read to
+the model as supporting evidence.
 
 ### Known gaps found on the real case
 

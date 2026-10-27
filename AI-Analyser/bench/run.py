@@ -33,20 +33,29 @@ CHECKS = ["flag", "primary", "no_removal", "consistent", "grounded"]
 # A forbidden phrase only counts when the model ASSERTS it. "precludes a definitive
 # diagnosis" is the correct thing to say about a VUS, so a negation shortly before the
 # match clears it. Same approach as _NEGATION_RE in wes/phenotype.py.
-_NEGATED = re.compile(
-    r"(?:\bnot\b|\bno\b|\bnor\b|\bcannot\b|\bprecludes?\b|\bprevents?\b|\bexcludes?\b|\bwithout\b|"
-    r"\black(?:s|ing)?\b|\bunlike\b|\brather than\b|\binstead of\b|\brules? out\b|\bunable to\b|"
-    r"\binsufficient\b|\bdoes not\b|\bis not\b|\bare not\b)"
-    r"[^.;:]{0,70}$")
+_NEG = (r"\bnot\b|\bno\b|\bnor\b|\bcannot\b|\bcan ?not\b|\bcould not\b|\bdoes not\b|\bdo not\b|"
+        r"\bdid not\b|\bis not\b|\bare not\b|\bwas not\b|\bwere not\b|\bn't\b|"
+        r"\bprecludes?\b|\bprevents?\b|\bexcludes?\b|\bwithout\b|\black(?:s|ing)?\b|\bunlike\b|"
+        r"\brather than\b|\binstead of\b|\brules? out\b|\bunable\b|\binsufficient\b")
+# "...do not establish a definitive diagnosis" - the negation sits before the phrase
+_NEGATED_BEFORE = re.compile(rf"(?:{_NEG})[^.;:]{{0,70}}$", re.I)
+# "a definitive diagnosis cannot be established" - and sometimes after it
+_NEGATED_AFTER = re.compile(rf"^[^.;:]{{0,50}}?(?:{_NEG})", re.I)
 
 
 def forbidden_hits(text: str, phrases: list[str]) -> list[str]:
+    """Phrases the model must not ASSERT. Clinical writing negates these constantly
+    ("does not establish a definitive diagnosis"), and the negation can sit on either
+    side of the phrase, so both directions are checked within the sentence."""
     hits = []
     for p in phrases:
         for m in re.finditer(re.escape(p), text):
-            sentence_start = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
-            before = text[max(sentence_start, m.start() - 80):m.start()]
-            if not _NEGATED.search(before):
+            start = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
+            end = min([i for i in (text.find(".", m.end()), text.find(";", m.end())) if i >= 0]
+                      or [len(text)])
+            before = text[max(start, m.start() - 90):m.start()]
+            after = text[m.end():end]
+            if not (_NEGATED_BEFORE.search(before) or _NEGATED_AFTER.search(after)):
                 hits.append(p)
                 break
     return hits

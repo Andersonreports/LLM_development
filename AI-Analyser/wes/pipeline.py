@@ -310,6 +310,9 @@ def _run_ai(db, case: Case) -> None:
         out, usage = ai.interpret(context)
     except ai.AIError as e:
         _event(db, case, "warning", f"AI assistant could not complete interpretation ({e}) - a rule-based draft was prepared instead. You can still review and edit everything below.")
+        # drop any earlier AI result: leaving it would show the reviewer a verdict from a
+        # previous run beside a rule-based draft, as though the AI had just produced it
+        case.ai_result, case.ai_flag, case.ai_usage = None, None, None
         case.review = _with_report_fields(case, _with_audit(draft_from_rules(case, pool), pool))
         db.commit()
         return

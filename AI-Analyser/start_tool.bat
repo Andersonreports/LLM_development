@@ -21,6 +21,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
+rem WSL shuts the whole Linux environment down once no Windows session is attached,
+rem which stops the service and would kill a running VEP annotation. vmIdleTimeout in
+rem .wslconfig is ignored from WSL 2.7, so hold a session open instead: one hidden
+rem sleeping process is enough to keep the distro alive.
+wsl -d Ubuntu -- pgrep -f "sleep 99999999" >nul 2>&1
+if errorlevel 1 (
+  powershell -NoProfile -WindowStyle Hidden -Command ^
+    "Start-Process -WindowStyle Hidden wsl -ArgumentList '-d','Ubuntu','--','sleep','99999999'"
+)
+
 echo    Starting the analysis service...
 wsl -d Ubuntu -- systemctl start wes ollama >nul 2>&1
 
@@ -52,4 +62,6 @@ echo    To stop it:  wsl -d Ubuntu -- systemctl stop wes
 echo.
 
 start "" http://localhost:8000
-timeout /t 4 >nul
+rem brief pause so the browser launches before this window closes
+rem (ping, not timeout: timeout fails when the script is run non-interactively)
+ping -n 4 127.0.0.1 >nul
