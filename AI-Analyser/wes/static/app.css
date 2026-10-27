@@ -357,3 +357,20 @@ table.list .var-col { max-width: 300px; overflow-wrap: break-word; }
 /* ------------------------------------------------------------------ system */
 .sys-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 13.5px; }
 .sys-row:last-child { border-bottom: none; }
+
+/* ---- rules vs AI, side by side (overview) ------------------------------- */
+.method-verdict { display: flex; align-items: center; gap: 8px; font-size: 13px;
+  padding: 8px 12px; border-radius: 8px 8px 0 0; border: 1px solid; font-weight: 600; }
+.method-verdict svg { width: 16px; height: 16px; flex: none; }
+.method-verdict.agree { background: var(--neg-bg); border-color: var(--neg-line); color: var(--neg); }
+.method-verdict.differ { background: var(--inc-bg); border-color: var(--inc-line); color: var(--inc); }
+.method-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  border: 1px solid var(--line); border-radius: 0 0 8px 8px; overflow: hidden; }
+.method-grid.one { grid-template-columns: 1fr 1fr; border-radius: 8px; }
+.method-grid > .method-col:first-child { border-right: 1px solid var(--line); }
+.method-col { padding: 12px 14px; min-width: 0; }
+.method-head { font-weight: 600; font-size: 13px; }
+@media (max-width: 760px) {
+  .method-grid, .method-grid.one { grid-template-columns: 1fr; }
+  .method-grid > .method-col:first-child { border-right: 0; border-bottom: 1px solid var(--line); }
+}

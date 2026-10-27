@@ -1,0 +1,20 @@
+# Patient data must never be committed. These patterns apply to the whole repository,
+# so a stray VCF dropped in any folder cannot be added by accident.
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.bam
+*.bam.bai
+*.cram
+*.fastq
+*.fastq.gz
+*.fq.gz
+data/
+uploads/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env

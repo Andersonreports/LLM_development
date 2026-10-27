@@ -129,6 +129,63 @@
   const zyg = (v) => Object.entries(v.zygosity || {}).map(([r, z]) => `${ROLE[r] || r}: ${ZYG[z] || z}`).join("<br>");
   const varLabel = (v) => `<span class="gene" style="font-style:italic;font-weight:700">${esc(v.gene)}</span> <span class="mono">${esc(v.hgvsc || v.variant_id)}</span> <span class="mono">${esc(v.hgvsp || "")}</span>`;
 
+  // ------------------------------------------------- rules vs AI, side by side
+  // The two methods are independent: the rule engine scores ACMG criteria and applies the
+  // phenotype gate in code; the AI reads the same evidence and judges it. Where they
+  // disagree, the reviewer needs to see both before deciding, not one answer and a warning.
+  function methodColumn(title, subtitle, flag, note, reason, variants, adjusted) {
+    const vs = variants.length
+      ? variants.map((v) => `<div class="mono xs" style="margin-top:2px">${varLabel(v)}</div>`).join("")
+      : '<div class="xs muted">none</div>';
+    return `<div class="method-col">
+      <div class="method-head">${esc(title)}<div class="xs muted">${esc(subtitle)}</div></div>
+      <div style="margin:8px 0">
+        <span class="flag flag-${esc(flag || "NEGATIVE")}">${esc(flag || "-")}</span>
+        ${adjusted ? `<span class="xs" style="color:var(--inc)"> &rarr; adjusted to ${esc(adjusted)}</span>` : ""}
+      </div>
+      ${note ? `<div class="xs" style="color:var(--inc);margin-bottom:6px">${esc(note)}</div>` : ""}
+      <div class="xs muted" style="margin-bottom:6px">${esc(reason || "")}</div>
+      <div class="xs" style="font-weight:600">Would report</div>${vs}
+    </div>`;
+  }
+
+  function comparisonPanel() {
+    const rule = data.rule_flag;
+    if (!rule) return "";
+    const ruleVars = (rule.keys || []).map((k) => pool[k]).filter(Boolean);
+
+    const ai = data.ai_result;
+    if (!ai) {
+      return `<div class="method-grid one">
+        ${methodColumn("Classification rules", "ACMG criteria computed in code", rule.flag, "",
+                       rule.reason, ruleVars, null)}
+        <div class="method-col muted">
+          <div class="method-head">AI assistant<div class="xs muted">not used for this case</div></div>
+          <div class="xs" style="margin-top:8px">No AI model was available, so the draft below comes
+            from the rules alone. You write the interpretation text.</div>
+        </div></div>`;
+    }
+
+    const proposed = ai.flag_proposed_by_ai || null;      // set when the phenotype gate stepped in
+    const aiVars = (ai.findings || [])
+      .filter((f) => f.report_section && f.report_section !== "not_reported")
+      .map((f) => pool[f.variant_key]).filter(Boolean);
+    const aiShown = proposed || ai.result_flag;
+    const agree = ai.result_flag === rule.flag && !proposed;
+    const banner = agree
+      ? `<div class="method-verdict agree">${iconCheck()}Both methods agree: <b>${esc(rule.flag)}</b></div>`
+      : `<div class="method-verdict differ">${iconAlert()}The two methods disagree &mdash; read both sides before deciding</div>`;
+
+    return banner + `<div class="method-grid">
+      ${methodColumn("Classification rules", "ACMG criteria computed in code", rule.flag, "",
+                     rule.reason, ruleVars, null)}
+      ${methodColumn("AI assistant", C.aiModel || "local model", aiShown,
+                     proposed ? "No reported variant matched the phenotype well enough, so the "
+                              + "flag was corrected to the rule-based result." : "",
+                     ai.flag_rationale, aiVars, proposed ? ai.result_flag : null)}
+    </div>`;
+  }
+
   // ---------------------------------------------------------------- review editor
   function renderReview() {
     if (!$("review")) return;
@@ -142,9 +199,10 @@
     const srcLine = review.source === "ai"
       ? "This draft was written by the AI assistant from the evidence below."
       : "This draft was built automatically from the classification rules (no AI assistant was used for this case).";
-    const disagrees = data.rule_flag && data.ai_result && data.rule_flag.flag !== data.ai_result.result_flag;
-    const disagree = disagrees
-      ? `<div class="warn">The automatic rule-based check suggests <b>${esc(data.rule_flag.flag)}</b>, while the AI assistant suggests <b>${esc(data.ai_result.result_flag)}</b>. Please review the evidence carefully before deciding.</div>` : "";
+    const ai = data.ai_result;
+    const disagrees = !!(data.rule_flag && ai
+      && (data.rule_flag.flag !== ai.result_flag || ai.flag_proposed_by_ai));
+    const disagree = comparisonPanel();
     if (C.editable) {
       const clean = attentionItems.length === 0 && !disagrees;
       setHTML("readyBanner", clean

@@ -39,8 +39,14 @@ def test_positive_without_phenotype_match_is_downgraded():
 
 
 def test_the_narrative_is_withdrawn_not_left_contradicting_the_flag():
-    data, _ = _case(0.06)
-    assert data["summary_line"] == "" and data["clinical_interpretation"] == ""
+    data = _data()
+    _enforce_phenotype_gate(data, [_finding("v1")], {"v1": _variant("v1", "CENPJ", 0.06)},
+                            {"rule_flag": {"flag": "NEGATIVE", "reason": "No P/LP variants identified"}})
+    # the AI's argument for a diagnosis must not survive into the report
+    assert data["clinical_interpretation"] == ""
+    assert "Diagnosis found." not in data["summary_line"]
+    # but the banner needs a line that matches the flag, not an empty space
+    assert data["summary_line"] == "No P/LP variants identified"
     notes = " ".join(data["reviewer_attention"])
     assert "Diagnosis found." in notes and "The variant explains it." in notes
     assert "pre-existing note" in notes          # earlier notes are kept

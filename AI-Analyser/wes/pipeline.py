@@ -419,7 +419,10 @@ def _enforce_phenotype_gate(data: dict, findings: list[dict], pool: dict[str, di
         if text:
             notes.append(f"Withdrawn AI {label} (not used in the report): {text}")
         data[key] = ""
+    # leave a summary that matches the flag rather than an empty banner
+    data["summary_line"] = (results.get("rule_flag") or {}).get("reason") or ""
     data["reviewer_attention"] = notes + list(data.get("reviewer_attention", []))
+    data["flag_proposed_by_ai"] = data["result_flag"]   # kept so the UI can show both
     data["result_flag"] = fallback
     return True
 

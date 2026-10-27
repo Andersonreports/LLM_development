@@ -102,7 +102,8 @@
         <div class="ico">{{ icon('alert') if flag == 'POSITIVE' else icon('help') if flag == 'INCONCLUSIVE' else icon('check-circle') if flag == 'NEGATIVE' else icon('dna') }}</div>
         <div>
           <div class="big">{{ {'POSITIVE': 'High-risk couple' if case.case_type == 'couple' else 'Positive', 'INCONCLUSIVE': 'Inconclusive', 'NEGATIVE': 'Negative', 'CARRIER': 'Carrier detected'}[flag] }}</div>
-          <div class="sub">{{ (case.review or {}).get('summary_line') or '' }}</div>
+          {% set summary = (case.review or {}).get('summary_line') %}
+          <div class="sub">{{ summary if summary else ('Write a one-line summary below before approving.' if case.status == 'review' else '') }}</div>
         </div>
         <div class="src">{% if case.status == 'approved' %}Approved by {{ case.approved_by }}{% elif case.status == 'rejected' %}Rejected by {{ case.rejected_by }}{% else %}Draft &middot; {{ 'AI' if (case.review or {}).get('source') == 'ai' else 'rule-based' }}{% endif %}</div>
       </div>
@@ -250,6 +251,7 @@ window.CASE = {
   flags: {{ flags|tojson }}, sections: {{ sections|tojson }}, classes: {{ classes|tojson }},
   hpo: {{ case.hpo_terms|tojson }},
   hpoEditable: {{ (case.status not in ('processing','queued','approved','rejected'))|tojson }},
+  aiModel: {{ ((case.ai_usage or {}).get('model') or 'model not recorded')|tojson }},
   steps: {{ steps|tojson }},
 };
 </script>
