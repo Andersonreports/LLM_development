@@ -18,3 +18,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+
+# Signed reports carry patient names, PINs and clinical history. The whole
+# ground-truth folder stays local; only de-identified facts go in the repo.
+trainig_datasets/
+training_datasets/
+*.pdf
+!ADVAT_LLM_Project_Roadmap.docx.pdf
