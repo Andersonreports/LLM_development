@@ -48,24 +48,34 @@ def _float(v) -> float | None:
         return None
 
 
+def clinvar_category(sig_raw: str) -> str | None:
+    """Reduce a ClinVar CLNSIG value to P / LP / P/LP / VUS / LB / B / conflicting / None.
+
+    Every term is read, not just the first: ClinVar joins terms with "/" (compound,
+    "Pathogenic/Likely_pathogenic/Likely_risk_allele"), "|" (extra non-germline terms) and
+    ",_" (low penetrance), and VEP joins several records at one site with "&". Pathogenic
+    and benign terms together are a conflict, never a pathogenic call."""
+    terms = [t.strip("_") for t in re.split(r"[,;|&/]", sig_raw.lower())]
+    if any(t.startswith("conflicting") for t in terms):
+        return "conflicting"
+    path = {t for t in terms if t in ("pathogenic", "likely_pathogenic")}
+    benign = {t for t in terms if t in ("benign", "likely_benign")}
+    if path and benign:
+        return "conflicting"
+    if path:
+        return "P/LP" if len(path) == 2 else ("P" if "pathogenic" in path else "LP")
+    if benign:
+        return "B" if "benign" in benign else "LB"
+    if any(t == "uncertain_significance" or t.startswith("vus") for t in terms):
+        return "VUS"
+    return None
+
+
 def _clinvar(csq: dict) -> dict:
     sig_raw = (csq.get("ClinVar_CLNSIG") or "").replace("&", ",")
     rev = (csq.get("ClinVar_CLNREVSTAT") or "").replace("&", ",")
     stars = CLINVAR_STARS.get(rev.strip(","), 0)
-    primary = re.split(r"[,&|]", sig_raw.lower())[0] if sig_raw else ""
-    cat = {
-        "pathogenic": "P",
-        "likely_pathogenic": "LP",
-        "pathogenic/likely_pathogenic": "P/LP",
-        "uncertain_significance": "VUS",
-        "likely_benign": "LB",
-        "benign": "B",
-        "benign/likely_benign": "B",
-    }.get(primary)
-    if "conflicting" in primary:
-        cat = "conflicting"
-    elif primary.startswith("pathogenic") and "low_penetrance" in sig_raw.lower():
-        cat = "P"  # low-penetrance pathogenic; flagged via clinvar_sig text
+    cat = clinvar_category(csq.get("ClinVar_CLNSIG") or "")
     return {
         "clinvar_sig": sig_raw.replace("_", " ") or None,
         "clinvar_category": cat,
