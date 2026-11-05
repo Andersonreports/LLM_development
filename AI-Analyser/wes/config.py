@@ -69,6 +69,13 @@ class Settings:
     af_recessive: float = _env("WES_AF_RECESSIVE", 0.01)
     af_known_pathogenic: float = _env("WES_AF_KNOWN_PATHOGENIC", 0.05)
 
+    # Gene panel: path to a text file with one gene symbol per line (e.g. an
+    # indication-based panel like "epilepsy_genes.txt").  Only variants in listed
+    # genes are ranked as candidates; genes outside the panel are still screened
+    # for ACMG secondary findings and carrier status.  Leave empty to rank the
+    # whole exome (the default before indication panels were supported).
+    gene_panel: Path = _env("WES_GENE_PANEL", Path(""))
+
     # How many ranked candidates are handed to the AI interpreter
     ai_max_candidates: int = _env("WES_AI_MAX_CANDIDATES", 40)
 

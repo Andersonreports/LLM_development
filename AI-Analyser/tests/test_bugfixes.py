@@ -136,3 +136,49 @@ def test_downgraded_splice_call_classifies_below_likely_pathogenic():
         "revel": None, "models": [], "clinvar_category": None, "clinvar_stars": None, "clinvar_sig": None}
     result = acmg.evaluate(v, g, "single", False)
     assert result["short"] != "LP"  # previously reached LP purely from the bogus canonical PVS1
+
+
+# ---------------------------------------------------------------- VUS noise gate
+# A VUS in HLA-B (extremely polymorphic, benign variation dominates) must not
+# push the case to INCONCLUSIVE.  This caused the false over-call in case 2.
+def test_vus_in_hla_noise_gene_does_not_flag_inconclusive():
+    from wes.resources import kb as make_kb
+    k = make_kb()
+    cands = [_variant("v1", "HLA-B", "VUS", 4,
+                      diseases=[{"name": "Drug hypersensitivity", "inheritance": ["AD"]}],
+                      phenotype_score=0.7)]
+    cands[0]["vtype"] = "missense"
+    flag = rule_based_flag("single", cands, None, has_phenotype=True, kb=k)
+    assert flag["flag"] == "NEGATIVE"
+
+
+def test_vus_in_real_disease_gene_still_flags_inconclusive():
+    from wes.resources import kb as make_kb
+    k = make_kb()
+    cands = [_variant("v1", "BRCA1", "VUS", 4,
+                      diseases=[{"name": "Breast cancer", "inheritance": ["AD"]}],
+                      phenotype_score=0.7)]
+    cands[0]["vtype"] = "missense"
+    flag = rule_based_flag("single", cands, None, has_phenotype=True, kb=k)
+    assert flag["flag"] == "INCONCLUSIVE"
+
+
+# ---------------------------------------------------------------- gene panel restriction
+def test_gene_panel_filters_candidates():
+    from wes.analysis import load_gene_panel
+    import tempfile, os
+    panel_file = os.path.join(tempfile.gettempdir(), "test_panel.txt")
+    with open(panel_file, "w") as f:
+        f.write("BRCA1\nBRCA2\n# comment line\nTP53\n")
+    try:
+        panel = load_gene_panel(panel_file)
+        assert panel == {"BRCA1", "BRCA2", "TP53"}
+    finally:
+        os.unlink(panel_file)
+
+
+def test_load_gene_panel_returns_none_for_empty_path():
+    from wes.analysis import load_gene_panel
+    from pathlib import Path
+    assert load_gene_panel(Path("")) is None
+    assert load_gene_panel(Path("/nonexistent/file.txt")) is None

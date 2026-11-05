@@ -13,6 +13,29 @@ from .variants import clinvar_pathogenic, established_pathogenic
 FLAGS = ("POSITIVE", "INCONCLUSIVE", "NEGATIVE", "CARRIER")
 CLASS_WEIGHT = {"P": 1.0, "LP": 0.8, "VUS": 0.35, "LB": 0.0, "B": 0.0}
 
+# Genes where a VUS is almost never clinically meaningful: extremely polymorphic
+# (HLA, MUC, KIR), very high LoF tolerance, or require a specific variant type
+# (TTN: only truncating variants cause disease).  A VUS here should not drive an
+# INCONCLUSIVE flag — it drowns real findings in noise.
+_VUS_NOISE_GENES = {
+    "HLA-A", "HLA-B", "HLA-C", "HLA-DRB1", "HLA-DRB5", "HLA-DQB1", "HLA-DQA1",
+    "HLA-DPA1", "HLA-DPB1",
+    "MUC2", "MUC3A", "MUC4", "MUC5AC", "MUC5B", "MUC6", "MUC12", "MUC16",
+    "MUC17", "MUC19", "MUC21",
+    "KIR2DL1", "KIR2DL3", "KIR2DL4", "KIR3DL1", "KIR3DL2", "KIR3DL3",
+    "FLG", "HRNR", "AHNAK2", "OBSCN", "IGFN1",
+}
+
+
+def _noise_gene(v: dict, g) -> bool:
+    if v["gene"] in _VUS_NOISE_GENES:
+        return True
+    if v["gene"] == "TTN" and v["vtype"] != "lof":
+        return True
+    if g.loeuf is not None and g.loeuf > 1.0 and not g.diseases:
+        return True
+    return False
+
 
 def _score(v: dict) -> float:
     cls_w = CLASS_WEIGHT.get(v["acmg"]["short"], 0)
@@ -39,9 +62,25 @@ def _annotate(v: dict, kb: KnowledgeBase, hpo_ids: list[str], case_type: str, pa
     v["acmg"] = acmg.evaluate(v, g, case_type, parentage)
 
 
+def load_gene_panel(path) -> set[str] | None:
+    """Read a gene panel file (one HGNC symbol per line).  Returns None if the
+    path is empty or the file does not exist."""
+    from pathlib import Path
+    p = Path(path) if not isinstance(path, Path) else path
+    if not str(p) or not p.is_file():
+        return None
+    genes: set[str] = set()
+    for line in p.read_text().splitlines():
+        sym = line.strip().split("#")[0].split("\t")[0].strip()
+        if sym:
+            genes.add(sym)
+    return genes or None
+
+
 def prioritise(variants: list[dict], case_type: str, kb: KnowledgeBase, hpo_ids: list[str],
                sexes: dict, affected: dict, parentage: bool,
-               assumed_ref_roles: set[str] = frozenset()) -> list[dict]:
+               assumed_ref_roles: set[str] = frozenset(),
+               gene_panel: set[str] | None = None) -> list[dict]:
     cands = inheritance.analyse(variants, case_type, kb, sexes, affected, assumed_ref_roles)
     by_key = {v["key"]: v for v in cands}
     for v in cands:
@@ -58,6 +97,8 @@ def prioritise(variants: list[dict], case_type: str, kb: KnowledgeBase, hpo_ids:
         v.pop("_partner_pathogenic", None)
     # benign/likely benign never ranked as candidates
     cands = [v for v in cands if v["acmg"]["short"] not in ("B", "LB")]
+    if gene_panel:
+        cands = [v for v in cands if v["gene"] in gene_panel]
     cands.sort(key=lambda v: -v["rank_score"])
     for i, v in enumerate(cands, 1):
         v["rank"] = i
@@ -156,7 +197,7 @@ def couple_analysis(variants: list[dict], kb: KnowledgeBase, sexes: dict) -> dic
 
 
 def rule_based_flag(case_type: str, candidates: list[dict], couple: dict | None,
-                    has_phenotype: bool) -> dict:
+                    has_phenotype: bool, kb: KnowledgeBase | None = None) -> dict:
     """Deterministic flag used as a baseline and as fallback if AI is unavailable."""
     if case_type == "couple":
         c = couple or {}
@@ -215,8 +256,10 @@ def rule_based_flag(case_type: str, candidates: list[dict], couple: dict | None,
                 positive.append(v)
         elif cls in ("P", "LP") and pheno and (v.get("inheritance_match") is None or not known_disease):
             inconclusive.append(v)
-        elif cls == "VUS" and fit and v.get("phenotype_score", 0) >= max(min_pheno, 0.45):
-            inconclusive.append(v)
+        elif cls == "VUS" and fit and v.get("phenotype_score", 0) >= max(min_pheno, 0.45) and known_disease:
+            g = kb.gene(v["gene"])
+            if v["vtype"] in ("lof", "missense", "inframe", "splice_region") and not _noise_gene(v, g):
+                inconclusive.append(v)
     if positive:
         return {"flag": "POSITIVE", "reason": "P/LP variant(s) with consistent inheritance and phenotype match",
                 "keys": [v["key"] for v in positive[:5]]}

@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import acmg, ai
-from .analysis import (carrier_findings, couple_analysis, prioritise, rule_based_flag,
-                       secondary_findings)
+from .analysis import (carrier_findings, couple_analysis, load_gene_panel, prioritise,
+                       rule_based_flag, secondary_findings)
 from .annotate import PipelineError, SampleInput, prepare_case_vcf
 from .config import settings
 from .db import Case, Event, SessionLocal
@@ -166,7 +166,7 @@ def _run_full(db, case: Case) -> None:
         results["candidates"] = []
         if case.consent_secondary:
             results["secondary"] = {r: secondary_findings(variants, kb, r, sexes.get(r), "couple") for r in roles}
-        flag = rule_based_flag("couple", [], couple, False)
+        flag = rule_based_flag("couple", [], couple, False, kb=kb)
     else:
         parentage = bool(qc.get("parentage_confirmed")) if case.case_type == "trio" else False
         proband_vcf = case.sample("proband").vcf_path
@@ -175,7 +175,12 @@ def _run_full(db, case: Case) -> None:
         if assumed:
             warnings.append("Parents supplied as separate VCFs: proband variants absent from a parental VCF are "
                             "treated as reference in that parent (coverage not verified); de novo calls use PM6, not PS2")
-        cands = prioritise(variants, case.case_type, kb, hpo_ids, sexes, affected, parentage, assumed)
+        panel = load_gene_panel(settings.gene_panel)
+        if panel:
+            results["gene_panel"] = {"file": str(settings.gene_panel), "genes": len(panel)}
+            _event(db, case, "info", f"Gene panel restriction active: {len(panel)} genes from {settings.gene_panel.name}")
+        cands = prioritise(variants, case.case_type, kb, hpo_ids, sexes, affected, parentage, assumed,
+                           gene_panel=panel)
         results["stats"]["candidates"] = len(cands)
         results["candidates"] = cands[:MAX_STORED_CANDIDATES]
         if case.consent_secondary:
@@ -183,7 +188,7 @@ def _run_full(db, case: Case) -> None:
                                                                      sexes.get(primary_role), case.case_type)}
         if case.consent_carrier:
             results["carrier"] = carrier_findings(variants, kb, primary_role, sexes.get(primary_role), case.case_type)
-        flag = rule_based_flag(case.case_type, cands, None, bool(hpo_ids))
+        flag = rule_based_flag(case.case_type, cands, None, bool(hpo_ids), kb=kb)
     results["gene_list"] = indication_genes(
         kb, hpo_ids, list((case.phenotype_ai or {}).get("suspected_genes") or []),
         settings.gene_list_size, settings.gene_list_min_score) if case.case_type != "couple" else []
