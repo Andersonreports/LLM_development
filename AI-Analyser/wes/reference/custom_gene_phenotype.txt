@@ -14,3 +14,21 @@
 # # PMID 00000000, Author et al., Journal 2020. Approved: AB 2026-11-16
 # # 0000	GENE	HP:0000000	Term name	-	OMIM:000000
 ncbi_gene_id	gene_symbol	hpo_id	hpo_name	frequency	disease_id
+#
+# --- Alternating hemiplegia of childhood (AHC): paroxysmal eye movements -------------------
+# Added 2026-11-16 after a WES case (Nov 2026) with paroxysmal upgaze. STATUS: PENDING SCIENTIST SIGN-OFF.
+# Gap: HPO (release in use) links "Paroxysmal tonic upgaze" HP:0033980 to no AHC gene, and
+# places it directly under "Abnormality of eye movement", so a patient whose key feature is
+# paroxysmal upgaze matches every eye-movement gene equally (ATP1A2, ATRX and NSD1 all scored
+# 0.407 on that case). Paroxysmal abnormal eye movements are a core feature of AHC.
+# ATP1A3 is the main AHC gene (AHC2, OMIM:614820); ATP1A2 is a minor/less certain AHC gene
+# (AHC1, OMIM:104290) and also causes DEE98 (OMIM:619605). Evidence seen:
+#   - Review of AHC genetics and clinical features, Rambam Maimonides Med J:
+#     https://www.rmmj.org.il/issues/63/1784/manuscript
+#   - Genomics England PanelApp, paroxysmal CNS disorders panel, ATP1A2 entry:
+#     https://panelapp.genomicsengland.co.uk/panels/541/gene/ATP1A2
+# No paper was found linking ATP1A2 to paroxysmal tonic upgaze SPECIFICALLY - the link rests
+# on AHC's paroxysmal eye movements. A scientist must confirm or delete these two lines.
+# Approved: ____ (initials, date)
+477	ATP1A2	HP:0033980	Paroxysmal tonic upgaze	-	OMIM:104290
+478	ATP1A3	HP:0033980	Paroxysmal tonic upgaze	-	OMIM:614820

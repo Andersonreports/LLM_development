@@ -218,6 +218,9 @@ class KnowledgeBase:
         self.ontology: Ontology | None = None
         self.genes: dict[str, GeneInfo] = {}
         self.term_ic: dict[str, float] = {}
+        # (gene, hpo_id) pairs that come only from the lab-curated file, so a match that
+        # depends on one can be shown to the reviewer as lab-added rather than HPO evidence
+        self.curated_links: set[tuple[str, str]] = set()
         self._load()
 
     def gene(self, symbol: str) -> GeneInfo:
@@ -269,13 +272,16 @@ class KnowledgeBase:
 
         g2p = hpo / "genes_to_phenotype.txt"
         term_genes: dict[str, set[str]] = defaultdict(set)
-        def load_g2p(path: Path) -> None:
+        def load_g2p(path: Path, curated: bool = False) -> None:
             with open(path, encoding="utf-8") as fh:
                 rows = (ln for ln in fh if not ln.lstrip().startswith("#"))
                 for r in csv.DictReader(rows, delimiter="\t"):
-                    sym, tid = r.get("gene_symbol"), r.get("hpo_id")
+                    sym, tid = r.get("gene_symbol"), (r.get("hpo_id") or "").strip()
                     if sym and tid:
-                        self.genes.setdefault(sym, GeneInfo(sym)).hpo.add(tid.strip())
+                        g = self.genes.setdefault(sym, GeneInfo(sym))
+                        if curated and tid not in g.hpo:
+                            self.curated_links.add((sym, tid))
+                        g.hpo.add(tid)
 
         if g2p.exists():
             load_g2p(g2p)
@@ -284,7 +290,7 @@ class KnowledgeBase:
             # same name next to the HPO download is a local, untracked supplement.
             for custom in (CUSTOM_G2P, hpo / CUSTOM_G2P.name):
                 if custom.exists():
-                    load_g2p(custom)
+                    load_g2p(custom, curated=True)
         else:
             self.warnings.append("genes_to_phenotype.txt missing - phenotype matching disabled")
 

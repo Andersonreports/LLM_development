@@ -59,6 +59,9 @@ def _annotate(v: dict, kb: KnowledgeBase, hpo_ids: list[str], case_type: str, pa
     g = kb.gene(v["gene"])
     v["gene_info"] = g.to_dict()
     v["phenotype_score"], v["phenotype_matches"] = gene_score(kb, hpo_ids, v["gene"])
+    curated = getattr(kb, "curated_links", set())
+    v["curated_phenotype_links"] = sorted(
+        m["match_name"] for m in v["phenotype_matches"] if (v["gene"], m["match"]) in curated)
     v["acmg"] = acmg.evaluate(v, g, case_type, parentage)
 
 

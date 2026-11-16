@@ -96,6 +96,27 @@ def test_existing_negation_still_works():
 
 
 # ---------------------------------------------------------------- curated supplement
+def test_curated_links_are_recorded_separately_from_hpo():
+    k = kb()
+    assert ("ATP1A2", "HP:0033980") in k.curated_links
+    # (the small test ontology lacks HP:0033980, so the term itself is dropped from the gene
+    # when ids are resolved - with the full hp.obo it stays; checked on a real case with the full HPO)
+    # an ordinary HPO annotation from the fixture is not marked as curated
+    assert ("SCN1A", "HP:0001250") not in k.curated_links
+
+
+def test_reviewer_is_told_when_a_reported_match_relies_on_a_curated_link():
+    from wes.pipeline import _with_audit
+    pool = {"v1": {"gene": "ATP1A2", "hgvsc": "c.160C>A", "acmg": {"audit": []}, "model_notes": [],
+                   "curated_phenotype_links": ["Paroxysmal tonic upgaze"]}}
+    reported = _with_audit({"findings": [{"variant_key": "v1", "report_section": "vus"}],
+                            "reviewer_attention": []}, pool)
+    assert any("lab-curated link" in n and "ATP1A2" in n for n in reported["reviewer_attention"])
+    dismissed = _with_audit({"findings": [{"variant_key": "v1", "report_section": "not_reported"}],
+                             "reviewer_attention": []}, pool)
+    assert dismissed["reviewer_attention"] == []
+
+
 def test_tracked_custom_gene_phenotype_file_parses():
     with open(CUSTOM_G2P, encoding="utf-8") as fh:
         reader = csv.DictReader((ln for ln in fh if not ln.lstrip().startswith("#")), delimiter="\t")

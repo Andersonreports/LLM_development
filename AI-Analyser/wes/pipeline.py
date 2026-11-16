@@ -493,6 +493,11 @@ def _with_audit(review: dict, pool: dict[str, dict]) -> dict:
             if "CAUTION:" in n:
                 caution = n.split("CAUTION:", 1)[1].strip().rstrip(")")
                 notes.append(f"{v.get('gene')} {v.get('hgvsc') or v.get('variant_id')}: {caution}")
+        if v.get("curated_phenotype_links") and f.get("report_section") not in (None, "not_reported"):
+            notes.append(
+                f"{v.get('gene')} {v.get('hgvsc') or v.get('variant_id')}: phenotype match relies on a "
+                f"lab-curated link not in HPO ({', '.join(v['curated_phenotype_links'])}) - see "
+                "wes/reference/custom_gene_phenotype.txt for its evidence and sign-off status")
     return {**review, "reviewer_attention": notes}
 
 
