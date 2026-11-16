@@ -17,6 +17,9 @@ from .config import settings
 
 log = logging.getLogger(__name__)
 
+# lab-curated additions to genes_to_phenotype.txt (same columns, '#' comment lines allowed)
+CUSTOM_G2P = Path(__file__).resolve().parent / "reference" / "custom_gene_phenotype.txt"
+
 INHERITANCE_TERMS = {
     "HP:0000006": "AD",
     "HP:0000007": "AR",
@@ -266,12 +269,22 @@ class KnowledgeBase:
 
         g2p = hpo / "genes_to_phenotype.txt"
         term_genes: dict[str, set[str]] = defaultdict(set)
-        if g2p.exists():
-            with open(g2p, encoding="utf-8") as fh:
-                for r in csv.DictReader(fh, delimiter="\t"):
+        def load_g2p(path: Path) -> None:
+            with open(path, encoding="utf-8") as fh:
+                rows = (ln for ln in fh if not ln.lstrip().startswith("#"))
+                for r in csv.DictReader(rows, delimiter="\t"):
                     sym, tid = r.get("gene_symbol"), r.get("hpo_id")
                     if sym and tid:
-                        self.genes.setdefault(sym, GeneInfo(sym)).hpo.add(tid)
+                        self.genes.setdefault(sym, GeneInfo(sym)).hpo.add(tid.strip())
+
+        if g2p.exists():
+            load_g2p(g2p)
+            # Lab-curated gene-phenotype links that the HPO release is missing. The tracked
+            # file lives with the code so every addition is reviewed in git; a file of the
+            # same name next to the HPO download is a local, untracked supplement.
+            for custom in (CUSTOM_G2P, hpo / CUSTOM_G2P.name):
+                if custom.exists():
+                    load_g2p(custom)
         else:
             self.warnings.append("genes_to_phenotype.txt missing - phenotype matching disabled")
 

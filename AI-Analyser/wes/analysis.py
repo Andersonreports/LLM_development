@@ -235,9 +235,11 @@ def rule_based_flag(case_type: str, candidates: list[dict], couple: dict | None,
     by_key = {v["key"]: v for v in candidates}
     positive, inconclusive = [], []
     for v in candidates:
-        cls = "LP" if v["acmg"]["short"] == "VUS" and _known_plp(v) else v["acmg"]["short"]
+        clinvar_upgrade = v["acmg"]["short"] == "VUS" and _known_plp(v)
+        cls = "LP" if clinvar_upgrade else v["acmg"]["short"]
         fit = v.get("inheritance_match") is not False
-        pheno = v.get("phenotype_score", 0) >= min_pheno
+        score = v.get("phenotype_score", 0)
+        pheno = score >= (settings.min_phenotype_clinvar_upgrade if clinvar_upgrade else min_pheno)
         # a gene with no known disease at all cannot be confirmed to explain this patient's
         # phenotype, regardless of how the (vacuous) inheritance-fit check comes out
         known_disease = bool(v.get("gene_info", {}).get("diseases"))
@@ -255,6 +257,9 @@ def rule_based_flag(case_type: str, candidates: list[dict], couple: dict | None,
             else:
                 positive.append(v)
         elif cls in ("P", "LP") and pheno and (v.get("inheritance_match") is None or not known_disease):
+            inconclusive.append(v)
+        elif clinvar_upgrade and fit and known_disease and score >= min_pheno:
+            # ClinVar-only P/LP with a moderate phenotype fit: worth a look, not a diagnosis
             inconclusive.append(v)
         elif cls == "VUS" and fit and v.get("phenotype_score", 0) >= max(min_pheno, 0.45) and known_disease:
             g = kb.gene(v["gene"])

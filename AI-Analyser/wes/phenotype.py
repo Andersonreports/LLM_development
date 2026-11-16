@@ -104,38 +104,163 @@ _MODIFIER_STOPWORDS = {
     "early", "late", "generalized", "focal", "diffuse", "multiple", "single", "normal",
     "abnormal", "increased", "decreased", "elevated", "low", "high", "type", "onset",
     "common", "variable", "typical", "recurrent", "persistent", "isolated", "classic",
+    # laterality/direction words: too generic, they appear in every clinical note
+    "right", "left", "upper", "lower", "proximal", "distal", "anterior", "posterior",
+    "medial", "lateral", "superior", "inferior", "ipsilateral", "contralateral",
 }
 
+# HPO terms that are clinical modifiers, not symptoms. "Family history revealed..." is a
+# section header in a referral, not a phenotype, and matching it adds noise to scoring.
+_HPO_META_BLOCKLIST: frozenset[str] = frozenset({
+    "HP:0032316",  # Family history
+    "HP:0032443",  # Past medical history
+    "HP:0012823",  # Clinical modifier
+    "HP:0000005",  # Mode of inheritance
+    "HP:0000006",  # Autosomal dominant inheritance
+    "HP:0000007",  # Autosomal recessive inheritance
+    "HP:0003674",  # Onset
+    "HP:0003581",  # Adult onset
+    "HP:0003593",  # Infantile onset
+    "HP:0003621",  # Juvenile onset
+    "HP:0003623",  # Neonatal onset
+    "HP:0011420",  # Age of death
+    "HP:0003829",  # Typified by incomplete penetrance
+    "HP:0031797",  # Clinical course
+    "HP:0040006",  # Mortality/Aging
+    "HP:0034335",  # Inheritance qualifier
+    "HP:0034345",  # Mendelian inheritance
+})
+
+# clinical shorthand vs HPO compound words: "upward gazing" in a note, "upgaze" in HPO
+_TERM_NORMALISE = [
+    (re.compile(r"\bupgaz"), "upward gaz"),
+    (re.compile(r"\bdowngaz"), "downward gaz"),
+]
+
+# qualifiers that HPO names carry but clinical prose often drops ("paroxysmal tonic
+# upgaze" written as "paroxysmal upward gaze"); a 3+ word name is also tried without one
+_QUALIFIER_SKIP_WORDS = {
+    "tonic", "clonic", "atonic", "spastic", "intermittent", "episodic",
+    "idiopathic", "essential", "benign", "postnatal", "prenatal",
+}
+
+# British -> American, applied to both the note and HPO names. HPO uses American spelling;
+# referral notes here are mostly British ("oedema", "anaemia", "haematuria", "diarrhoea").
+_BRITISH_TO_AMERICAN = [
+    (re.compile(r"\boe"), "e"),
+    (re.compile(r"ae(?=[a-z])"), "e"),
+    (re.compile(r"rrhoe"), "rrhea"),
+    (re.compile(r"our\b"), "or"),
+    (re.compile(r"ise\b"), "ize"),
+    (re.compile(r"isation\b"), "ization"),
+    (re.compile(r"lyse\b"), "lyze"),
+    (re.compile(r"centres?\b"), "center"),
+    (re.compile(r"fibre"), "fiber"),
+]
+
+_ARTICLE_RE = re.compile(r"\b(?:the|an?)\s+")
 
 # a negation word/prefix immediately before a match - "non-consanguineous", "no evidence
 # of X", "denies X", "without X" - means the opposite of the matched term, not its presence.
-# Checked against the ~30 characters right before each match, not the whole document.
+# Checked against the ~50 characters right before each match, not the whole document.
 _NEGATION_RE = re.compile(
     r"(?:\bnon|\bno|\bnot|\bwithout|\babsent|\bnegative for|\bdenies|\bdenied|\bruled out|"
-    r"\bexclud(?:e|es|ed|ing)|\bunremarkable for)"
-    r"(?:\s+(?:evidence|signs?|history|features?|findings?)\s+of)?[\s-]*$"
+    r"\bexclud(?:e|es|ed|ing)|\bunremarkable for|\bno\s+known|\bno\s+prior|\bno\s+past)"
+    r"(?:\s+(?:evidence|signs?|history|features?|findings?|complaints?)\s+of)?[\s\-,;]*$"
 )
+
+# a term after "family history", "sister has", "mother with" describes a relative, not the
+# patient, so it must not count towards the patient's phenotype. Same sentence, within
+# ~120 characters before the match.
+_FAMILY_HIST_RE = re.compile(
+    r"\b(?:family history|family members?|relatives?|"
+    r"(?:(?:his|her|their)\s+)?(?:mother|father|sister|brother|sibling|parent|grandparent|"
+    r"uncle|aunt|cousin|son|daughter|child(?:ren)?)\b[^.]{0,40}(?:has|had|have|having|with|of|reported))"
+    r"[^.]{0,80}$",
+    re.IGNORECASE,
+)
+
+_SUFFIX = r"(?:s|es|'s|ic|al|ity|ous|ing|ed)?(?![a-z])"
+
+
+def _sub_all(text: str, rules) -> str:
+    for pat, rep in rules:
+        text = pat.sub(rep, text)
+    return text
+
+
+def _normalise(text: str) -> str:
+    return _sub_all(_sub_all(text, _BRITISH_TO_AMERICAN), _TERM_NORMALISE)
+
+
+def _strip_articles(text: str) -> str:
+    return " ".join(_ARTICLE_RE.sub(" ", text).split())
+
+
+def _search_forms(name: str) -> list[tuple[str, bool]]:
+    """The ways an HPO name can appear in prose, each paired with whether it is searched
+    in the article-stripped copy of the note: as written; without articles; singular;
+    without a final 'e' (gaze -> gazing); without one qualifier word."""
+    forms = [(name, False)]
+    bare = _strip_articles(name)
+    if bare != name:
+        forms.append((bare, True))
+    if bare.endswith("s") and len(bare) > 5 and not bare.endswith("ss"):
+        forms.append((bare[:-1], True))
+    if bare.endswith("e") and len(bare) > 4:
+        forms.append((bare[:-1], True))
+    words = bare.split()
+    if len(words) >= 3:
+        for i, w in enumerate(words):
+            if w in _QUALIFIER_SKIP_WORDS:
+                short = " ".join(words[:i] + words[i + 1:])
+                forms.append((short, True))
+                if short.endswith("e") and len(short) > 4:
+                    forms.append((short[:-1], True))
+    return forms
 
 
 def extract_from_text(kb: KnowledgeBase, text: str) -> list[dict]:
     """Deterministic, LLM-independent HPO extraction: matches clinical-history text
     against known HPO term names/synonyms. Used whenever no AI is configured, and as a
     floor/safety-net even when AI is available - free text should never go completely
-    unused just because an LLM isn't reachable. A term immediately preceded by a negation
-    ("non-consanguineous", "no family history of X") is reported as excluded, not present."""
+    unused just because an LLM isn't reachable.
+
+    Tolerates British spelling, plurals and common suffixes, dropped articles and
+    qualifiers. A term immediately preceded by a negation ("non-consanguineous", "no
+    family history of X") or describing a relative ("sister has seizures") is reported
+    as excluded, not present. HPO meta-terms (onset, inheritance, "family history") are
+    skipped."""
     onto = kb.ontology
     if not onto or not text or not text.strip():
         return []
-    text_l = text.lower()
+    texts = {False: _normalise(text.lower())}
+    texts[True] = _strip_articles(texts[False])
+
     names = sorted(onto._name_index.items(), key=lambda kv: -len(kv[0]))
     seen_ids: set[str] = set()
+    # longest names go first; a shorter name inside an already-matched span is the same
+    # mention ("seizure" inside "febrile seizure"), not a second finding. Spans are kept
+    # per copy of the note because the two copies have different offsets.
+    spans: dict[bool, list[tuple[int, int]]] = {False: [], True: []}
     out = []
     for name, tid in names:
-        if len(name) < 4 or name in _MODIFIER_STOPWORDS or tid in seen_ids:
+        if len(name) < 4 or name in _MODIFIER_STOPWORDS or tid in seen_ids or tid in _HPO_META_BLOCKLIST:
             continue
-        m = re.search(r"(?<![a-z])" + re.escape(name) + r"(?![a-z])", text_l)
-        if m:
-            seen_ids.add(tid)
-            negated = bool(_NEGATION_RE.search(text_l[max(0, m.start() - 30):m.start()]))
-            out.append({"id": tid, "name": onto.name(tid), "excluded": negated})
+        for form, stripped in _search_forms(_normalise(name)):
+            hay = texts[stripped]
+            if form not in hay:   # cheap pre-check; the regex below is the real test
+                continue
+            m = re.search(r"(?<![a-z])" + re.escape(form) + _SUFFIX, hay)
+            if m:
+                break
+        else:
+            continue
+        if any(s <= m.start() and m.end() <= e for s, e in spans[stripped]):
+            continue
+        seen_ids.add(tid)
+        spans[stripped].append((m.start(), m.end()))
+        negated = bool(_NEGATION_RE.search(hay[max(0, m.start() - 50):m.start()]))
+        relative = bool(_FAMILY_HIST_RE.search(hay[max(0, m.start() - 120):m.start()]))
+        out.append({"id": tid, "name": onto.name(tid), "excluded": negated or relative})
     return out

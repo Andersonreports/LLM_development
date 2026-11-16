@@ -403,15 +403,30 @@ def _enforce_phenotype_gate(data: dict, findings: list[dict], pool: dict[str, di
     reviewer notes. A reviewer who disagrees can set POSITIVE and rewrite the text."""
     if data["result_flag"] != "POSITIVE":
         return False
-    diagnostic = [pool.get(f["variant_key"], {}) for f in findings
-                  if f.get("report_section") in ("primary", "vus")]
+    reported = [f for f in findings if f.get("report_section") in ("primary", "vus")]
+    diagnostic = [pool.get(f["variant_key"], {}) for f in reported]
     best = max((v.get("phenotype_score") or 0.0 for v in diagnostic), default=0.0)
     threshold = settings.min_phenotype_for_positive
-    if best >= threshold:
+
+    def needed(f: dict, v: dict) -> float:
+        # a variant that is only P/LP because ClinVar says so (our own evidence scores it
+        # VUS) needs the stricter fit, the same rule analysis.rule_based_flag applies
+        clinvar_only = ((f.get("acmg") or v.get("acmg") or {}).get("short") == "VUS"
+                        and clinvar_pathogenic(v, min_stars=1))
+        return settings.min_phenotype_clinvar_upgrade if clinvar_only else threshold
+
+    if any((v.get("phenotype_score") or 0.0) >= needed(f, v) for f, v in zip(reported, diagnostic)):
         return False
+    clinvar_only_blocked = best >= threshold
 
     fallback = (results.get("rule_flag") or {}).get("flag") or "INCONCLUSIVE"
-    if diagnostic:
+    if clinvar_only_blocked:
+        genes = ", ".join(sorted({v.get("gene", "?") for v in diagnostic}))
+        why = (f"the reported variants ({genes}) are pathogenic only on ClinVar's say-so (our own ACMG "
+               f"evidence scores them VUS), and their best phenotype match, {best:.2f}, is below the "
+               f"{settings.min_phenotype_clinvar_upgrade:.2f} required for a ClinVar-only finding to "
+               "explain this patient")
+    elif diagnostic:
         genes = ", ".join(sorted({v.get("gene", "?") for v in diagnostic}))
         why = (f"the best phenotype match among the reported variants ({genes}) is {best:.2f}, "
                f"below the {threshold:.2f} needed to say a variant explains this patient")

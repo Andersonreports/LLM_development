@@ -103,6 +103,11 @@ class Settings:
     # candidate in the whole list scored 0.309 - a 0.009 margin - so the value is worth
     # checking before routine use.
     min_phenotype_for_positive: float = _env("WES_MIN_PHENOTYPE_POSITIVE", 0.3)
+    # A variant our own ACMG evidence leaves at VUS but ClinVar lists as P/LP is pathogenic
+    # in SOME patient, not necessarily this one. It needs a clearly better phenotype fit
+    # before the rule flag calls the case POSITIVE; between the two thresholds it is
+    # INCONCLUSIVE. Value taken from the teammate's skills package, not yet validated.
+    min_phenotype_clinvar_upgrade: float = _env("WES_MIN_PHENOTYPE_CLINVAR_UPGRADE", 0.55)
 
     # Local model (Ollama)
     ollama_url: str = _env("WES_OLLAMA_URL", "http://127.0.0.1:11434")
