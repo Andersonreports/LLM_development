@@ -42,6 +42,8 @@ function addBubble(role, text = "") {
 
 function setStreaming(on) {
   streaming = on; sendBtn.disabled = on; stopBtn.hidden = !on; input.disabled = on;
+  // A reply can change backend state (tinygpt loads on first use), so re-read the banner.
+  if (!on) refreshStatus();
 }
 
 // ---- training history ------------------------------------------------------
@@ -145,6 +147,18 @@ function updateBanner() {
   banner.hidden = false;
 }
 
+// Groq's /models list has no "type" field, so classify by id. Only `chat` entries can
+// answer in this UI; the others are listed for visibility but will error if picked.
+function modelKind(id) {
+  const s = id.toLowerCase();
+  if (/whisper/.test(s)) return { label: "speech-to-text", chat: false };
+  if (/orpheus|tts|playai/.test(s)) return { label: "voice (text-to-speech)", chat: false };
+  if (/guard/.test(s)) return { label: "safety filter", chat: false };
+  if (/embed/.test(s)) return { label: "embeddings", chat: false };
+  if (/allam/.test(s)) return { label: "chat · Arabic", chat: true };
+  return { label: "chat", chat: true };
+}
+
 async function loadModels() {
   if (backendSel.value !== "groq") { modelSel.innerHTML = ""; return; }
   modelSel.innerHTML = "<option>loading…</option>";
@@ -153,9 +167,13 @@ async function loadModels() {
     const { models, default: def } = await r.json();
     modelSel.innerHTML = "";
     if (!models.length) { modelSel.innerHTML = `<option value="">(no models — set GROQ_API_KEY)</option>`; return; }
-    for (const m of models) {
+    // Chat models first, then the rest; each option shows its type after the id.
+    const sorted = [...models].sort((a, b) =>
+      (modelKind(a).chat ? 0 : 1) - (modelKind(b).chat ? 0 : 1) || a.localeCompare(b));
+    for (const m of sorted) {
       const o = document.createElement("option");
-      o.value = o.textContent = m; if (m === def) o.selected = true; modelSel.appendChild(o);
+      o.value = m; o.textContent = `${m}  ·  ${modelKind(m).label}`;
+      if (m === def) o.selected = true; modelSel.appendChild(o);
     }
   } catch { modelSel.innerHTML = `<option value="">(could not load models)</option>`; }
 }

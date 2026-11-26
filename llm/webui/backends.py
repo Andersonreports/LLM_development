@@ -80,11 +80,9 @@ class GroqBackend:
             r = httpx.get(f"{settings.groq_base_url}/models", headers=self._headers(),
                           timeout=15)
             r.raise_for_status()
-            ids = sorted(m["id"] for m in r.json().get("data", []))
-            # Keep text chat models near the top; drop audio/whisper/guard-only entries.
-            chatty = [m for m in ids if not any(x in m.lower()
-                      for x in ("whisper", "tts", "guard", "embed"))]
-            return chatty or ids
+            # Return every model; the UI labels each one (chat / voice / ...) and lists
+            # chat models first, so non-chat entries are visible but clearly marked.
+            return sorted(m["id"] for m in r.json().get("data", []))
         except Exception:  # noqa: BLE001 - network/key problems -> empty, UI falls back
             return []
 

@@ -242,3 +242,7 @@ body {
   .only-narrow { display: grid; }
   .seg select { max-width: 32vw; }
 }
+
+/* The hidden attribute must win over any display rule above (.modal-wrap, .live, ...),
+   otherwise JS setting el.hidden = true has no visible effect. */
+[hidden] { display: none !important; }
