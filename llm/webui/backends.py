@@ -12,8 +12,10 @@ browser tabs take turns on the one model instead of corrupting each other's stat
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -66,7 +68,18 @@ class GroqBackend:
 
     def describe(self) -> str:
         key = "key set" if settings.groq_api_key else "no key"
-        return f"Groq Cloud ({settings.groq_model}, {key}) - conversation is sent to Groq's servers"
+        ok, why = self.tools_status()
+        if ok:
+            try:
+                from .knowledge import lookup
+                tools_txt = (f"genetics lookups ON (ClinVar {lookup.meta().get('clinvar_date')}, "
+                             f"gnomAD, ClinGen, HPO)")
+            except Exception:  # noqa: BLE001
+                tools_txt = "genetics lookups ON"
+        else:
+            tools_txt = f"genetics lookups {why}"
+        return (f"Groq Cloud ({settings.groq_model}, {key}) · {tools_txt} - "
+                f"conversation is sent to Groq's servers")
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {settings.groq_api_key}",
@@ -86,24 +99,112 @@ class GroqBackend:
         except Exception:  # noqa: BLE001 - network/key problems -> empty, UI falls back
             return []
 
+    # Most lookup rounds a single answer may take before it must reply with what it has.
+    MAX_TOOL_ROUNDS = 5
+    # gpt-oss spends part of max_tokens on hidden reasoning; with tool results to digest a
+    # small budget cuts answers off mid-sentence, so tool mode never goes below this.
+    # (Groq's free tier counts max_tokens against an 8,000 tokens/minute budget, so not
+    # higher than needed.)
+    MIN_TOOL_TOKENS = 1500
+    # Groq's 429 says how long to wait; wait it out automatically only if it is short.
+    MAX_RATE_WAIT = 20
+
+    def tools_status(self) -> tuple[bool, str]:
+        if not settings.genetics_tools:
+            return False, "off (GENETICS_TOOLS=false)"
+        from .knowledge import tools
+        return tools.available()
+
     def stream(self, messages: list[dict], params: GenParams,
-               model: str | None = None) -> Iterator[str]:
+               model: str | None = None) -> Iterator[str | dict]:
+        """Yields text chunks (str) and, in tool mode, lookup events ({"tool": {...}})."""
         ok, reason = self.available()
         if not ok:
             raise BackendError(reason)
-        body = {
-            "model": model or settings.groq_model,
-            "messages": messages,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "stream": True,
-        }
-        if params.top_p is not None:
-            body["top_p"] = params.top_p
+        use_tools, _ = self.tools_status()
+        msgs = list(messages)
+        max_tokens = params.max_tokens
+        if use_tools:
+            from .knowledge import tools
+            if not any(m.get("role") == "system" for m in msgs):
+                msgs.insert(0, {"role": "system", "content": tools.SYSTEM_PROMPT})
+            max_tokens = max(max_tokens, self.MIN_TOOL_TOKENS)
+
+        for round_no in range(self.MAX_TOOL_ROUNDS + 1):
+            body = {
+                "model": model or settings.groq_model,
+                "messages": msgs,
+                "max_tokens": max_tokens,
+                "temperature": params.temperature,
+                "stream": True,
+            }
+            if params.top_p is not None:
+                body["top_p"] = params.top_p
+            # On the last round no tools are offered, so the model has to answer.
+            if use_tools and round_no < self.MAX_TOOL_ROUNDS:
+                body["tools"] = tools.TOOLS
+                body["tool_choice"] = "auto"
+
+            text: list[str] = []
+            calls: dict[int, dict] = {}
+            for attempt in range(2):
+                try:
+                    for kind, value in self._stream_once(body):
+                        if kind == "text":
+                            text.append(value)
+                            yield value
+                        else:  # a fragment of a tool call; arguments arrive in pieces
+                            idx = value.get("index", 0)
+                            c = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                            c["id"] = value.get("id") or c["id"]
+                            fn = value.get("function") or {}
+                            c["name"] = fn.get("name") or c["name"]
+                            c["arguments"] += fn.get("arguments") or ""
+                    break
+                except _ToolCallRejected as e:
+                    # Groq rejected a malformed lookup call before any answer text; the
+                    # model usually gets it right on a second try.
+                    if attempt == 0 and not text:
+                        calls.clear()
+                        continue
+                    raise BackendError(f"the model made an invalid lookup call twice ({e})") \
+                        from None
+                except _RateLimited as e:
+                    # Rejected before any output, so a retry is safe. Wait only if short.
+                    if attempt == 0 and e.wait <= self.MAX_RATE_WAIT:
+                        yield {"notice": f"Groq free-tier limit reached - waiting "
+                                         f"{e.wait:.0f} s, then continuing…"}
+                        time.sleep(e.wait + 0.5)
+                        continue
+                    raise BackendError(
+                        f"Groq's per-minute limit for this model is used up ({e.detail}). "
+                        f"Wait about {max(e.wait, 1):.0f} s and send again.") from None
+            if not calls:
+                return
+
+            ordered = [calls[i] for i in sorted(calls)]
+            msgs.append({"role": "assistant", "content": "".join(text) or None,
+                         "tool_calls": [{"id": c["id"], "type": "function",
+                                         "function": {"name": c["name"],
+                                                      "arguments": c["arguments"] or "{}"}}
+                                        for c in ordered]})
+            for c in ordered:
+                yield {"tool": {"name": c["name"], "status": "running",
+                                "query": _first_arg(c["arguments"])}}
+                result, event = tools.run(c["name"], c["arguments"])
+                yield {"tool": {**event, "status": "done"}}
+                msgs.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": json.dumps(result, ensure_ascii=False,
+                                                   separators=(",", ":"))[:8000]})
+
+    def _stream_once(self, body: dict) -> Iterator[tuple[str, object]]:
+        """One streamed Groq request -> ("text", str) and ("call", tool_call_delta) items."""
         try:
             with httpx.stream("POST", f"{settings.groq_base_url}/chat/completions",
                               headers=self._headers(), json=body,
                               timeout=settings.request_timeout) as r:
+                if r.status_code == 429:
+                    raise _RateLimited.from_response(r)
                 if r.status_code != 200:
                     detail = r.read().decode("utf-8", "replace")[:500]
                     raise BackendError(f"Groq returned HTTP {r.status_code}: {detail}")
@@ -114,13 +215,62 @@ class GroqBackend:
                     if payload == "[DONE]":
                         break
                     try:
-                        delta = json.loads(payload)["choices"][0]["delta"].get("content")
-                    except (KeyError, IndexError, json.JSONDecodeError):
+                        chunk = json.loads(payload)
+                    except json.JSONDecodeError:
                         continue
-                    if delta:
-                        yield delta
+                    if "error" in chunk:  # Groq can fail mid-stream; never swallow it
+                        err = chunk["error"] if isinstance(chunk["error"], dict) else {}
+                        if err.get("code") == "tool_use_failed":
+                            raise _ToolCallRejected(err.get("message", "tool call rejected"))
+                        raise BackendError(f"Groq error: {err.get('message') or chunk['error']}")
+                    try:
+                        delta = chunk["choices"][0]["delta"]
+                    except (KeyError, IndexError):
+                        continue
+                    if delta.get("content"):
+                        yield "text", delta["content"]
+                    for tc in delta.get("tool_calls") or []:
+                        yield "call", tc
         except httpx.HTTPError as e:
             raise BackendError(f"could not reach Groq: {e}") from e
+
+
+class _ToolCallRejected(Exception):
+    """Groq refused the model's tool call (bad arguments) - code 'tool_use_failed'."""
+
+
+class _RateLimited(Exception):
+    """Groq answered 429 (tokens/requests per minute used up)."""
+
+    def __init__(self, wait: float, detail: str):
+        super().__init__(detail)
+        self.wait, self.detail = wait, detail
+
+    @classmethod
+    def from_response(cls, r) -> "_RateLimited":
+        body = r.read().decode("utf-8", "replace")
+        try:
+            msg = json.loads(body)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            msg = body[:300]
+        wait = None
+        try:
+            wait = float(r.headers.get("retry-after", ""))
+        except ValueError:
+            pass
+        if wait is None:  # "... Please try again in 7.53s." / "in 1m2.5s"
+            m = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", msg)
+            wait = (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else 30.0
+        short = re.search(r"\((TPM|RPM|TPD|RPD)\): Limit [\d,]+", msg)
+        return cls(wait, short.group(0) if short else "rate limit")
+
+
+def _first_arg(raw: str) -> str:
+    try:
+        args = json.loads(raw or "{}")
+        return str(next(iter(args.values()), "")) if isinstance(args, dict) else ""
+    except json.JSONDecodeError:
+        return ""
 
 
 # --------------------------------------------------------------------------- tinygpt

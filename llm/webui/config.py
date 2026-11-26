@@ -43,6 +43,22 @@ class Settings:
     # list from /models; if this id is gone, pick another from the dropdown.
     groq_model: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
+    # ---- genetics knowledge (Groq only) ----
+    # Local SQLite built by webui/knowledge/build_db.py from the AI-Analyser resources.
+    genetics_db: Path = Path(os.environ.get(
+        "GENETICS_DB", str(ROOT / "data" / "genetics.sqlite")))
+    # Give the Groq model the lookup tools + the genetics system prompt.
+    genetics_tools: bool = _bool("GENETICS_TOOLS", True)
+    # Allow the two online lookups (NCBI name search, gnomAD variant frequencies).
+    genetics_online: bool = _bool("GENETICS_ONLINE", True)
+    # Local VEP (+ AlphaMissense, gnomAD frequencies from the cache, PubMed IDs) runs
+    # inside WSL with the AI-Analyser's tools and resources.
+    genetics_vep: bool = _bool("GENETICS_VEP", True)
+    wsl_distro: str = os.environ.get("GENETICS_WSL_DISTRO", "Ubuntu")
+    wsl_resources: str = os.environ.get("GENETICS_WSL_RESOURCES", "/root/wes/resources")
+    wsl_tools_bin: str = os.environ.get("GENETICS_WSL_TOOLS_BIN",
+                                        "/root/wes/tools/mamba/envs/wes/bin")
+
     # ---- tinygpt (our own model) ----
     tinygpt_ckpt: Path = Path(os.environ.get(
         "TINYGPT_CKPT", str(ROOT / "checkpoints" / "shakespeare_char" / "best.pt")))

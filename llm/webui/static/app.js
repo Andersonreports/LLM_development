@@ -28,6 +28,11 @@ function autosize() { input.style.height = "auto"; input.style.height = Math.min
 function scrollDown() { chat.scrollTop = chat.scrollHeight; }
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 
+// Escape first, then allow only **bold**; drop gpt-oss citation markers like 【functions.x】.
+function formatAnswer(s) {
+  return esc(s.replace(/【[^】]*】/g, "")).replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+}
+
 function addBubble(role, text = "") {
   empty.hidden = true;
   const wrap = document.createElement("div");
@@ -193,6 +198,38 @@ async function send(text) {
   };
 
   let acc = "", errored = false;
+  // Lookups (ClinVar, gnomAD, ...) show as small rows above the answer text.
+  let toolBox = null, textEl = null;
+  const toolRows = new Map();
+  const parts = () => {
+    if (!textEl) {
+      bubble.textContent = "";
+      toolBox = document.createElement("div"); toolBox.className = "tools";
+      textEl = document.createElement("div"); textEl.className = "answer";
+      bubble.append(toolBox, textEl);
+    }
+  };
+  const showTool = (t) => {
+    parts();
+    const key = `${t.name}|${t.query}`;
+    let row = toolRows.get(key);
+    if (!row) { row = document.createElement("div"); row.className = "tool"; toolBox.appendChild(row); toolRows.set(key, row); }
+    row.replaceChildren();
+    row.classList.toggle("bad", t.status === "done" && !t.ok);
+    const head = document.createElement("span");
+    head.textContent = t.status === "running"
+      ? `⏳ Looking up ${t.query || t.name}…`
+      : `📚 ${t.label || t.name}: ${t.query} — ${t.summary || ""}`;
+    row.appendChild(head);
+    for (const url of t.links || []) {
+      const a = document.createElement("a");
+      a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      try { a.textContent = new URL(url).hostname.replace(/^www\./, ""); } catch { a.textContent = "link"; }
+      row.append(" ", a);
+    }
+    if (t.sources && t.sources.length) row.title = t.sources.join("\n");
+    scrollDown();
+  };
   try {
     const r = await fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -209,7 +246,15 @@ async function send(text) {
         const line = frame.split("\n").find((l) => l.startsWith("data:"));
         if (!line) continue;
         let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch { continue; }
-        if (ev.delta) { acc += ev.delta; bubble.textContent = acc; scrollDown(); }
+        if (ev.tool) showTool(ev.tool);
+        else if (ev.notice) { parts(); const n = document.createElement("div"); n.className = "tool"; n.textContent = "⏳ " + ev.notice; toolBox.appendChild(n); scrollDown(); }
+        else if (ev.delta) {
+          acc += ev.delta;
+          // Chat models: light formatting. tinygpt: raw text, exactly as generated.
+          if (backendSel.value === "groq") { parts(); textEl.innerHTML = formatAnswer(acc); }
+          else bubble.textContent = acc;
+          scrollDown();
+        }
         else if (ev.error) { bubble.textContent = "⚠ " + ev.error; bubble.classList.add("err"); errored = true; }
       }
     }

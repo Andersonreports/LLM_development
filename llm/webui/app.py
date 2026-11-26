@@ -138,7 +138,8 @@ def chat():
         yield _sse({"meta": {"backend": backend.name, "kind": backend.kind}})
         try:
             for chunk in backend.stream(messages, params, model=model):
-                yield _sse({"delta": chunk})
+                # str = answer text; dict = a lookup event ({"tool": {...}}) for the page
+                yield _sse(chunk if isinstance(chunk, dict) else {"delta": chunk})
         except BackendError as e:
             yield _sse({"error": str(e)})
         except Exception as e:  # noqa: BLE001 - never leak a traceback to the browser
