@@ -4,22 +4,28 @@ from __future__ import annotations
 
 import json
 
-from . import lookup
+from . import acmg, lookup
 
 SYSTEM_PROMPT = """You are ADVAT, a genetics and bioinformatics assistant for a clinical genomics laboratory (Anderson Diagnostics & Labs). Your users are geneticists and bioinformaticians.
 
-You have lookup tools backed by the lab's local copies of ClinVar, VEP (gene, consequence, HGVS), AlphaMissense, gnomAD (gene constraint and variant frequencies), ClinGen dosage sensitivity, HPO and the lab's exome capture kit.
+You have lookup tools backed by downloaded copies of PUBLIC databases (they contain no data from this lab): ClinVar, VEP (gene, consequence, HGVS), AlphaMissense, gnomAD (gene constraint and variant frequencies), ClinGen dosage sensitivity, HPO plus the lab's exome capture kit regions (the only lab-specific data). Never call these databases "the lab's" databases; say e.g. "ClinVar (public, 2026-10-19 release)".
+When a tool returns a number, quote it exactly; never add a related figure from memory (e.g. do not state pLI if only LOEUF was returned, and never contradict a returned value).
 
 Rules:
 1. For any specific fact about a variant (classification, review status, rsID, position, population frequency), a gene (constraint, dosage sensitivity, associated diseases, inheritance, ClinVar counts) or an HPO term, call the matching tool first and answer from its result.
-2. Cite where each fact came from, with its release, e.g. "ClinVar (local, 2026-10-19): Pathogenic, 3 stars". Include the ClinVar or gnomAD link when one is returned.
+2. Cite where each fact came from, e.g. "ClinVar (local, 2026-10-19): Pathogenic, 3 stars". Give a release date ONLY if it appears in that same source's own entry in "sources"; never copy one source's date (e.g. ClinVar's) onto another. Include the ClinVar or gnomAD link when one is returned.
 3. If a tool returns an error, nothing, or several candidates, say so plainly. Never fill the gap from memory with variant IDs, frequencies, classifications, scores or PMIDs.
 4. General knowledge (ACMG/AMP criteria, HGVS rules, file formats, pipelines, inheritance concepts) you may answer yourself; say when you are unsure.
 5. Coordinates are GRCh38. An allele frequency is per allele (chromosome), not per person: write e.g. "0.00012, about 1 in 8,300 alleles". For a rare heterozygous variant the carrier frequency is about twice the allele frequency; say so if you mention carriers.
-6. Use plain text: short paragraphs and simple "-" lists. No markdown tables or headings, and no citation markers such as 【...】; name the source in words instead. **Bold** is fine for key results.
+6. Format: short paragraphs, "-" lists, **bold** for key results, and a markdown table when listing several criteria or variants. No headings, and no citation markers such as 【...】; name the source in words instead. Be concise: one row or line per point, no repetition between a table and a summary.
 7. Look each variant or gene up once; do not repeat a lookup by another name for something already returned.
-8. Variant evidence: consequence and HGVS come from VEP on the MANE transcript. AlphaMissense is a computational predictor (supporting-level evidence at most), not a classification. "same_amino_acid" lists pathogenic ClinVar variants at the same residue (relevant to PS1/PM5, for the expert to judge). PubMed IDs are linked to the position's rsID and may concern another allele; never state what a paper says, only that it exists. If the lookup says the REF does not match GRCh38, tell the user the position or build is wrong.
-9. You support the lab's experts; you do not make the final classification. Do not invent patient details."""
+8. Variant evidence: consequence and HGVS come from VEP on the MANE transcript. "same_protein_change_established" is PS1-type evidence; "different_missense_same_residue_established" is PM5-type evidence (never call it PS1). "same_residue_weak_records" (0-1 star) support neither. PubMed IDs are linked to the position's rsID and may concern another allele; never state what a paper says, only that it exists. If the lookup says the REF does not match GRCh38, tell the user the position or build is wrong.
+9. ACMG: the variant lookup returns "acmg_notes", computed from the evidence by rule. Follow them, including the strength modifiers they give (e.g. PM2_Supporting, not PM2 Moderate), and do not contradict them from memory. Never invent a strength modifier the notes or the official definition do not give. Before stating what a criterion means, get its official definition from acmg_criterion rather than recalling it - request, in a single call, only the codes you will discuss that acmg_notes does not already settle (at most 8).
+10. Every acmg_notes item marked NOT ASSESSABLE, NOT MET, "Do NOT" or "MUST" is binding; restate those verdicts as given. Never compute a frequency threshold (e.g. for BS1) yourself.
+11. Use three distinct verdicts and never blur them: "met" (the evidence satisfies it), "not met" (the evidence shows it does not apply), "not assessable" (the data needed are missing). Missing data is never "not met".
+12. PP4 depends on the PATIENT's phenotype: if the user gave none, PP4 is "not assessable". If given, PP4 needs a phenotype highly specific to a disease with a single genetic cause (e.g. cystic fibrosis with raised sweat chloride -> CFTR). "Genetically heterogeneous" means many different GENES can cause it (developmental and epileptic encephalopathy, intellectual disability, autism, ataxia, cardiomyopathy); many variants in one gene is not heterogeneity.
+13. Never claim ClinGen gene-disease validity ("definitive", "strong") - it is not in the lab's data. Mention that gene-specific ClinGen VCEP rules may override general ones.
+14. You support the lab's experts; you do not make the final classification. Do not invent patient details."""
 
 TOOLS = [
     {"type": "function", "function": {
@@ -55,6 +61,17 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "phenotype": {"type": "string", "description": "HPO ID or phenotype name"}},
             "required": ["phenotype"]}}},
+    {"type": "function", "function": {
+        "name": "acmg_criterion",
+        "description": (
+            "Official ACMG/AMP 2015 definitions of variant-classification criteria, with "
+            "default strength, cautions and ClinGen SVI modifications. Ask for ALL the codes "
+            "you need in ONE call, comma-separated (e.g. 'PVS1, PM2, PM4, BS1, BS2'). Use "
+            "'combining' for the rules that combine criteria into Pathogenic/Likely "
+            "pathogenic/VUS/Likely benign/Benign, or 'all' for a one-line list."),
+        "parameters": {"type": "object", "properties": {
+            "code": {"type": "string", "description": "one or more criterion codes, comma-separated; or 'combining' or 'all'"}},
+            "required": ["code"]}}},
 ]
 
 # Each tool takes one string. Accept it under any argument name: models sometimes
@@ -63,9 +80,11 @@ _FUNCS = {
     "lookup_variant": lookup.lookup_variant,
     "lookup_gene": lookup.lookup_gene,
     "lookup_phenotype": lookup.lookup_phenotype,
+    "acmg_criterion": acmg.acmg_criterion,
 }
 
-LABELS = {"lookup_variant": "variant", "lookup_gene": "gene", "lookup_phenotype": "phenotype"}
+LABELS = {"lookup_variant": "variant", "lookup_gene": "gene", "lookup_phenotype": "phenotype",
+          "acmg_criterion": "ACMG rule"}
 
 
 def available() -> tuple[bool, str]:
@@ -125,8 +144,16 @@ def _summary(name: str, r: dict) -> str:
             bits.append(f"gnomAD AF {local.get('exomes_af') or local.get('genomes_af')} (local)")
         elif local:
             bits.append("absent from gnomAD (local)")
-        if isinstance(r.get("clinvar_nearby"), dict) and r["clinvar_nearby"]["same_amino_acid"]:
-            bits.append(f"{len(r['clinvar_nearby']['same_amino_acid'])} P/LP at same residue")
+        nb = r.get("clinvar_nearby") or {}
+        if nb.get("same_protein_change_established"):
+            bits.append(f"{len(nb['same_protein_change_established'])} established P/LP same "
+                        f"protein change (PS1-type)")
+        if isinstance(nb.get("different_missense_same_residue_established"), list) and \
+                nb["different_missense_same_residue_established"]:
+            bits.append(f"{len(nb['different_missense_same_residue_established'])} established "
+                        f"P/LP other missense same residue (PM5-type)")
+        if nb.get("same_residue_weak_records"):
+            bits.append(f"{len(nb['same_residue_weak_records'])} weak (0-1★) same-residue record")
         if r.get("capture_kit"):
             bits.append("in capture kit" if r["capture_kit"]["in_target"]
                         else "outside capture kit")
@@ -142,6 +169,13 @@ def _summary(name: str, r: dict) -> str:
         if r.get("diseases"):
             bits.append(f"{len(r['diseases'])} linked diseases")
         return " · ".join(bits) or "found"
+    if name == "acmg_criterion":
+        if r.get("code"):
+            return f"{r['code']}: {r['strength']}"
+        if r.get("combining_rules"):
+            return "combining rules"
+        crit = r.get("criteria") or {}
+        return ", ".join(crit)[:120] if crit and all(isinstance(v, dict) for v in crit.values())             else "criteria list"
     if name == "lookup_phenotype":
         t = r.get("term", {})
         return f"{t.get('id')} {t.get('name')} · {r.get('genes_annotated', {}).get('total', 0)} genes"

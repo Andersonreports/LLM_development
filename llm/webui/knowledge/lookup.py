@@ -76,7 +76,8 @@ def meta() -> dict[str, str]:
 
 
 def _src_clinvar() -> str:
-    return f"ClinVar (local copy, release {meta().get('clinvar_date', '?')}, GRCh38)"
+    return (f"ClinVar (public NCBI database, downloaded copy of the "
+            f"{meta().get('clinvar_date', '?')} release, GRCh38)")
 
 
 # --------------------------------------------------------------------------- online helpers
@@ -413,6 +414,7 @@ def lookup_variant(query: str) -> dict:
         positions = _annotate(out, positions)
     if positions and "error" not in out:
         _gnomad_online(out, positions)
+        out["acmg_notes"] = _acmg_notes(out)
     if out.get("name_matches"):
         out["sources"].append("NCBI ClinVar search (online, used only to identify the variant)")
     return out
@@ -483,7 +485,7 @@ def _annotate(out: dict, positions: list[str]) -> list[str]:
         ann.append(a)
         fixed.append(a.get("position_grch38", p))
     out["annotation"] = ann[0] if len(ann) == 1 else ann
-    out["sources"].append("VEP 116 + AlphaMissense (local)")
+    out["sources"].append("VEP 116 + AlphaMissense (public tools/data, run locally; no release date)")
 
     # A typed position that VEP left-aligned may now match a ClinVar record.
     if not out.get("clinvar") and fixed[0] != positions[0]:
@@ -495,25 +497,40 @@ def _annotate(out: dict, positions: list[str]) -> list[str]:
         if out["clinvar"]:
             out.pop("note", None)
 
-    # Pathogenic ClinVar variants at the same amino acid (PS1/PM5-type evidence) or nearby.
+    # Pathogenic ClinVar variants at the same amino acid, split in code (not left to the
+    # model) into the same protein change (PS1-type) and a different change at the same
+    # residue (PM5-type), plus others nearby.
     main = ann[0]
-    same, other = [], []
+    # PS1/PM5 need the comparison variant to be ESTABLISHED pathogenic, so only >=2-star
+    # ClinVar records count; weaker ones are listed apart and labelled.
+    same_change, other_change, weak, other = [], [], [], []
+    is_missense = "missense" in (main.get("consequence") or "")
     for i, n in enumerate(near):
         a = r.get(f"n{i}") or {}
+        stars = _stars(n["revstat"]) or 0
         label = (f"{a.get('hgvs_p') or a.get('hgvs_c') or n['chrom'] + '-' + str(n['pos'])} "
-                 f"({n['clnsig']}, {_stars(n['revstat'])}★, VCV {n['vid']})")
-        if (main.get("protein_position") and a.get("gene") == main.get("gene")
-                and a.get("protein_position") == main.get("protein_position")):
-            same.append(label)
+                 f"({n['clnsig']}, {stars}★, VCV {n['vid']})")
+        same_gene = a.get("gene") == main.get("gene")
+        same_residue = (main.get("protein_position") and same_gene
+                        and a.get("protein_position") == main.get("protein_position"))
+        # Same protein change matched on the p. name itself: an in-frame deletion can be
+        # numbered from a different first residue (CFTR p.Phe508del: 507 vs 508).
+        if same_gene and a.get("hgvs_p") and a.get("hgvs_p") == main.get("hgvs_p"):
+            (same_change if stars >= 2 else weak).append("same protein change: " + label)
+        elif same_residue and is_missense and "missense" in (a.get("consequence") or ""):
+            (other_change if stars >= 2 else weak).append("other missense same residue: "
+                                                          + label)
         else:
             other.append(label)
-    if near:
-        out["clinvar_nearby"] = {
-            "same_amino_acid": same,
-            "within_15bp": other[:5] + ([f"+{len(other) - 5} more"] if len(other) > 5 else []),
-            "note": "Pathogenic/likely pathogenic ClinVar variants (local) other than this one."}
-    else:
-        out["clinvar_nearby"] = "no pathogenic/likely pathogenic ClinVar variants within 15 bp"
+    out["clinvar_nearby"] = {
+        "same_protein_change_established": [x.split(": ", 1)[1] for x in same_change],
+        "different_missense_same_residue_established":
+            [x.split(": ", 1)[1] for x in other_change] if is_missense else "n/a (not missense)",
+        "same_residue_weak_records": weak,
+        "other_within_15bp": other[:5] + ([f"+{len(other) - 5} more"] if len(other) > 5 else []),
+        "note": "Pathogenic/likely pathogenic ClinVar variants (local) other than this one. "
+                "'established' = 2 stars or more; 'weak' = 0-1 star, too weak a comparator "
+                "for PS1/PM5."}
 
     c, p0 = _split(fixed[0])[:2]
     with _connect() as con:
@@ -532,6 +549,122 @@ def _annotate(out: dict, positions: list[str]) -> list[str]:
     return fixed
 
 
+_LOF = ("frameshift", "stop gained", "splice acceptor", "splice donor", "start lost")
+
+
+def _acmg_notes(out: dict) -> list[str]:
+    """Rule-level facts about which ACMG/AMP criteria the looked-up evidence bears on, and
+    at what strength under ClinGen SVI guidance. Computed in code so the model does not
+    have to remember the rules (it got PM2 strength and PS1/PM5 wrong from memory). These
+    point at criteria; they do not apply them."""
+    notes = []
+    a = out.get("annotation")
+    a = (a[0] if isinstance(a, list) else a) or {}
+    cons = a.get("consequence") or ""
+
+    # Frequency: PM2 / BA1 / BS1
+    g = next((x for x in out.get("gnomad") or [] if x and "error" not in x), None)
+    local = a.get("gnomad_local") or {}
+    absent = (g and g.get("found") is False) or (not g and local and not (
+        local.get("exomes_af") or local.get("genomes_af")))
+    if absent:
+        notes.append("Absent from gnomAD v4.1 -> PM2 may apply, at SUPPORTING strength "
+                     "(PM2_Supporting) per ClinGen SVI 2020, not Moderate. Absence can also "
+                     "reflect low coverage at this site.")
+    else:
+        afs = []
+        if g and g.get("found"):
+            afs = [g.get("combined_allele_frequency") or 0] + [
+                (g.get(k) or {}).get("faf95_popmax") or 0 for k in ("exomes", "genomes")]
+        elif local:
+            afs = [local.get("exomes_af") or 0, local.get("genomes_af") or 0]
+        top = max(afs, default=0)
+        if top > 0.05:
+            notes.append(f"Allele frequency {top:.3g} > 5% -> BA1 (stand-alone benign) "
+                         "threshold met (ACMG 2015; check the ClinGen SVI BA1 exception list).")
+        elif top:
+            notes.append(f"Present in gnomAD (highest AF/FAF95 {top:.3g}) -> PM2 NOT MET. BS1 is "
+                         "NOT ASSESSABLE from these data: it needs a disease-specific maximum "
+                         "credible allele frequency (prevalence, inheritance, allelic "
+                         "heterogeneity, penetrance) or a ClinGen VCEP threshold. Do not compute "
+                         "or assume a threshold yourself unless the user supplies one.")
+            cv0 = (out.get("clinvar") or [{}])[0]
+            if (cv0.get("review_stars") or 0) >= 3 and "athogenic" in (
+                    cv0.get("classification") or "") and "onflicting" not in (
+                    cv0.get("classification") or ""):
+                notes.append("An expert panel/practice guideline classifies this variant as "
+                             "pathogenic at this frequency, so the frequency is evidently "
+                             "compatible with the disease (e.g. a common recessive disorder). Do "
+                             "NOT apply BS1 or BA1 against it.")
+
+    # Variant type: PVS1 / PM4 / PP3-BP4
+    if any(x in cons for x in _LOF):
+        gene_bits = ""
+        gene = a.get("gene")
+        if gene:
+            with _connect() as con:
+                c = con.execute("SELECT loeuf FROM constraint_ WHERE gene = ?", (gene,)).fetchone()
+                d = con.execute("SELECT hi_score FROM clingen_dosage WHERE gene = ?",
+                                (gene,)).fetchone()
+            gene_bits = (f" For {gene}: LOEUF {c['loeuf'] if c else 'n/a'}, ClinGen "
+                         f"haploinsufficiency score {d['hi_score'] if d else 'not curated'}.")
+        last = ""
+        ex = a.get("exon") or ""
+        if "/" in ex and ex.split("/")[0] == ex.split("/")[1]:
+            last = " The variant is in the LAST exon, so it may escape NMD (lowers PVS1 strength)."
+        notes.append("Predicted loss-of-function -> PVS1 candidate. Strength depends on LoF "
+                     "being an established disease mechanism for the gene and on NMD/exon "
+                     "position: apply the ClinGen SVI PVS1 decision tree (Abou Tayoun et al. "
+                     "2018)." + gene_bits + last)
+    elif "inframe" in cons:
+        notes.append("In-frame length change -> PM4 candidate (not if in a repetitive region "
+                     "without known function).")
+    if a.get("alphamissense"):
+        notes.append("Computational evidence here is ONE predictor (AlphaMissense). ClinGen SVI "
+                     "(Pejaver et al. 2022) recommends a single calibrated predictor with "
+                     "calibrated thresholds; PP3/BP4 strength follows the lab's calibration.")
+
+    elif not any(x in cons for x in _LOF + ("synonymous",)):
+        notes.append("No computational predictor in these data scores this variant type "
+                     "(AlphaMissense covers missense only) -> PP3/BP4 NOT ASSESSABLE here "
+                     "(not 'not met'); other calibrated tools may still apply.")
+
+    # Same residue: PS1 / PM5 (established comparators only)
+    nb = out.get("clinvar_nearby") or {}
+    if nb.get("same_protein_change_established"):
+        notes.append("An ESTABLISHED (>=2-star) P/LP ClinVar variant gives the SAME amino-acid "
+                     "change by a different nucleotide change -> PS1-type evidence (PS1 is "
+                     "defined for missense; check the nucleotide change does not affect "
+                     "splicing differently).")
+    if isinstance(nb.get("different_missense_same_residue_established"), list) and \
+            nb["different_missense_same_residue_established"]:
+        notes.append("An ESTABLISHED (>=2-star) P/LP missense differs at the same residue -> "
+                     "PM5-type evidence (this is PM5, not PS1).")
+    if nb.get("same_residue_weak_records"):
+        notes.append("Same-residue ClinVar records with 0-1 star exist; they are too weak to "
+                     "support PS1 or PM5 on their own.")
+
+    cv = out.get("clinvar") or []
+    if cv:
+        notes.append("ClinVar's own classification is not an ACMG criterion (PP5/BP6 are not "
+                     "recommended, Biesecker & Harrison 2018); use its underlying evidence.")
+        top = cv[0]
+        if (top.get("review_stars") or 0) >= 3:
+            notes.append(f"ClinVar has an expert-panel/practice-guideline record "
+                         f"({top['classification']}, {top['review_stars']} stars). Much of its "
+                         "evidence (functional studies PS3/BS3, affected cases PS4/PM3, "
+                         "segregation) lives in the literature, not in these databases, so the "
+                         "criteria assessable here UNDERSTATE the real evidence. You MUST say "
+                         "this in the answer, and must not present the database-only criteria "
+                         "as the variant's overall picture.")
+    notes.append("Not assessable from databases: de novo status (PS2/PM6), segregation "
+                 "(PP1/BS4), functional studies (PS3/BS3), phase with another variant "
+                 "(PM3/BP2), healthy homozygous/heterozygous adults (BS2), and PP4 unless the "
+                 "user gave the patient's phenotype. Gene-specific ClinGen VCEP rules, where "
+                 "they exist, override these general rules.")
+    return notes
+
+
 def _gnomad_online(out: dict, positions: list[str]) -> None:
     """Online gnomAD adds allele counts, homozygotes and FAF95. When it answers, drop the
     local VEP-cache frequencies for that variant so the model gets one set of numbers."""
@@ -548,9 +681,9 @@ def _gnomad_online(out: dict, positions: list[str]) -> None:
             used_local = True
     if online:
         out["gnomad"] = online
-        out["sources"].append("gnomAD v4.1 (online API)")
+        out["sources"].append("gnomAD v4.1 (online API, live; no release date)")
     if used_local:
-        out["sources"].append("gnomAD v4.1 frequencies from the VEP cache (local)")
+        out["sources"].append("gnomAD v4.1 frequencies (public, from the downloaded VEP cache)")
 
 
 # --------------------------------------------------------------------------- genes
@@ -574,11 +707,12 @@ def lookup_gene(symbol: str) -> dict:
         if c:
             out["gnomad_constraint"] = {
                 "transcript": c["transcript"], "mane_select": bool(c["mane"]),
-                "pLI": c["pli"], "LOEUF": c["loeuf"], "lof_observed": c["lof_obs"],
+                # pLI rounded: the model misread 1.5e-34 as "pLI ~ 1"
+                "pLI": round(c["pli"], 3) if c["pli"] is not None else None, "LOEUF": c["loeuf"], "lof_observed": c["lof_obs"],
                 "lof_expected": c["lof_exp"], "lof_oe": c["lof_oe"],
                 "missense_oe": c["mis_oe"], "missense_z": c["mis_z"],
                 "synonymous_z": c["syn_z"], "flags": c["flags"] or None}
-            out["sources"].append(m.get("gnomad_constraint", "gnomAD") + " gene constraint (local)")
+            out["sources"].append(m.get("gnomad_constraint", "gnomAD") + " gene constraint (public, downloaded copy)")
         d = con.execute("SELECT * FROM clingen_dosage WHERE gene = ?", (gene,)).fetchone()
         if d:
             out["clingen_dosage_sensitivity"] = {
@@ -587,7 +721,7 @@ def lookup_gene(symbol: str) -> dict:
                 "triplosensitivity_score": d["ts_score"],
                 "triplosensitivity": d["ts_desc"], "last_evaluated": d["last_evaluated"],
                 "url": f"https://search.clinicalgenome.org/kb/gene-dosage?search={gene}"}
-            out["sources"].append(f"ClinGen dosage sensitivity (local, {m.get('clingen_date')})")
+            out["sources"].append(f"ClinGen dosage sensitivity (public, downloaded {m.get('clingen_date')})")
         dis = con.execute(
             "SELECT g.disease_id, g.association, d.name, d.inheritance FROM gene_disease g "
             "LEFT JOIN disease d ON d.id = g.disease_id WHERE g.gene = ? LIMIT 40",
@@ -596,7 +730,7 @@ def lookup_gene(symbol: str) -> dict:
             out["diseases"] = [{"id": r["disease_id"], "name": r["name"],
                                 "inheritance": r["inheritance"] or None,
                                 "association": r["association"]} for r in dis]
-            out["sources"].append(f"HPO gene-disease annotations (local, {m.get('hpo_version')})")
+            out["sources"].append(f"HPO gene-disease annotations (public, release {m.get('hpo_version')})")
         counts = con.execute(
             "SELECT c.clnsig, COUNT(*) n FROM clinvar_gene g JOIN clinvar c ON c.rowid = g.rid "
             "WHERE g.gene = ? GROUP BY c.clnsig", (gene,)).fetchall()
@@ -659,5 +793,5 @@ def lookup_phenotype(query: str) -> dict:
                                                           for g in genes],
                             "note": "Direct annotations to this exact term only; genes "
                                     "annotated to more specific child terms are not counted."},
-        "sources": [f"HPO (local, {m.get('hpo_version')})"],
+        "sources": [f"HPO (public, release {m.get('hpo_version')})"],
     }

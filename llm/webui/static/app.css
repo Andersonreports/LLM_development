@@ -149,6 +149,11 @@ body {
 .bubble .tool { font-size: 12.5px; color: var(--muted); white-space: normal; }
 .bubble .tool.bad { color: var(--err); }
 .bubble .tool a { color: var(--accent); margin-left: 4px; }
+/* tables in answers */
+.bubble .tbl { overflow-x: auto; margin: 8px 0; white-space: normal; }
+.bubble table { border-collapse: collapse; font-size: 13px; width: 100%; }
+.bubble th, .bubble td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+.bubble th { background: var(--bg); font-weight: 650; }
 .cursor::after { content: "\25CF"; margin-left: 2px; animation: blink 1s steps(2) infinite; color: var(--accent); }
 @keyframes blink { 50% { opacity: 0; } }
 

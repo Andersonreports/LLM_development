@@ -101,11 +101,12 @@ class GroqBackend:
 
     # Most lookup rounds a single answer may take before it must reply with what it has.
     MAX_TOOL_ROUNDS = 5
-    # gpt-oss spends part of max_tokens on hidden reasoning; with tool results to digest a
-    # small budget cuts answers off mid-sentence, so tool mode never goes below this.
-    # (Groq's free tier counts max_tokens against an 8,000 tokens/minute budget, so not
-    # higher than needed.)
-    MIN_TOOL_TOKENS = 1500
+    # gpt-oss spends part of max_tokens on hidden reasoning, so tool mode never goes below
+    # these. The first round usually just decides on lookups; the rounds after it write the
+    # answer from the results (an ACMG table needs room). Groq's free tier counts
+    # max_tokens against 8,000 tokens/minute, so the first round stays small.
+    FIRST_ROUND_TOKENS = 1500
+    ANSWER_TOKENS = 3000
     # Groq's 429 says how long to wait; wait it out automatically only if it is short.
     MAX_RATE_WAIT = 20
 
@@ -128,9 +129,11 @@ class GroqBackend:
             from .knowledge import tools
             if not any(m.get("role") == "system" for m in msgs):
                 msgs.insert(0, {"role": "system", "content": tools.SYSTEM_PROMPT})
-            max_tokens = max(max_tokens, self.MIN_TOOL_TOKENS)
 
         for round_no in range(self.MAX_TOOL_ROUNDS + 1):
+            if use_tools:
+                floor = self.FIRST_ROUND_TOKENS if round_no == 0 else self.ANSWER_TOKENS
+                max_tokens = max(params.max_tokens, floor)
             body = {
                 "model": model or settings.groq_model,
                 "messages": msgs,
@@ -147,12 +150,15 @@ class GroqBackend:
 
             text: list[str] = []
             calls: dict[int, dict] = {}
+            finish = None
             for attempt in range(2):
                 try:
                     for kind, value in self._stream_once(body):
                         if kind == "text":
                             text.append(value)
                             yield value
+                        elif kind == "finish":
+                            finish = value
                         else:  # a fragment of a tool call; arguments arrive in pieces
                             idx = value.get("index", 0)
                             c = calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
@@ -180,6 +186,10 @@ class GroqBackend:
                         f"Groq's per-minute limit for this model is used up ({e.detail}). "
                         f"Wait about {max(e.wait, 1):.0f} s and send again.") from None
             if not calls:
+                if finish == "length":  # never let a cut-off answer look complete
+                    yield {"notice": "Answer cut off at the length limit. Ask \"continue\", "
+                                     "or raise Max tokens in ⚙ settings."}
+                    yield "\n\n⚠ [answer cut off at the length limit]"
                 return
 
             ordered = [calls[i] for i in sorted(calls)]
@@ -231,6 +241,9 @@ class GroqBackend:
                         yield "text", delta["content"]
                     for tc in delta.get("tool_calls") or []:
                         yield "call", tc
+                    reason = chunk["choices"][0].get("finish_reason")
+                    if reason:
+                        yield "finish", reason
         except httpx.HTTPError as e:
             raise BackendError(f"could not reach Groq: {e}") from e
 

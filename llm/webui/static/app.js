@@ -28,9 +28,35 @@ function autosize() { input.style.height = "auto"; input.style.height = Math.min
 function scrollDown() { chat.scrollTop = chat.scrollHeight; }
 function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
 
-// Escape first, then allow only **bold**; drop gpt-oss citation markers like 【functions.x】.
+// Light markdown for chat answers: escape everything first (so model text can never inject
+// HTML), then allow **bold**, "#" headings (shown bold) and pipe tables. Drops gpt-oss
+// citation markers like 【functions.x】.
 function formatAnswer(s) {
-  return esc(s.replace(/【[^】]*】/g, "")).replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  const bold = (t) => t.replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>");
+  const lines = esc(s.replace(/【[^】]*】/g, "")).split("\n");
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*\|.*\|\s*$/.test(lines[i])) {
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      i--;
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => bold(c.trim()));
+      const isSep = (r) => /^\s*\|[\s:|-]+\|\s*$/.test(r);
+      let html = '<div class="tbl"><table>';
+      rows.forEach((r, k) => {
+        if (isSep(r)) return;
+        const tag = k === 0 && rows.length > 1 && isSep(rows[1]) ? "th" : "td";
+        html += "<tr>" + cells(r).map((c) => `<${tag}>${c}</${tag}>`).join("") + "</tr>";
+      });
+      out.push(html + "</table></div>");
+    } else if (/^\s*#{1,6}\s+/.test(lines[i])) {
+      out.push("<b>" + bold(lines[i].replace(/^\s*#{1,6}\s+/, "")) + "</b>");
+    } else {
+      out.push(bold(lines[i]));
+    }
+  }
+  // tables are blocks; join the rest with newlines (the bubble keeps white-space: pre-wrap)
+  return out.join("\n").replace(/\n?(<div class="tbl">.*?<\/div>)\n?/gs, "$1");
 }
 
 function addBubble(role, text = "") {
