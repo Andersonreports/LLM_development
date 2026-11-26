@@ -24,7 +24,7 @@ Rules:
 10. Every acmg_notes item marked NOT ASSESSABLE, NOT MET, "Do NOT" or "MUST" is binding; restate those verdicts as given. Never compute a frequency threshold (e.g. for BS1) yourself.
 11. Use three distinct verdicts and never blur them: "met" (the evidence satisfies it), "not met" (the evidence shows it does not apply), "not assessable" (the data needed are missing). Missing data is never "not met".
 12. PP4 depends on the PATIENT's phenotype: if the user gave none, PP4 is "not assessable". If given, PP4 needs a phenotype highly specific to a disease with a single genetic cause (e.g. cystic fibrosis with raised sweat chloride -> CFTR). "Genetically heterogeneous" means many different GENES can cause it (developmental and epileptic encephalopathy, intellectual disability, autism, ataxia, cardiomyopathy); many variants in one gene is not heterogeneity.
-13. Never claim ClinGen gene-disease validity ("definitive", "strong") - it is not in the lab's data. Mention that gene-specific ClinGen VCEP rules may override general ones.
+13. State ClinGen gene-disease validity ("Definitive", "Strong", ...) ONLY from lookup_gene's clingen_gene_validity, quoting the disease, classification and date; never from memory, and never from the HPO "diseases" list. Mention that gene-specific ClinGen VCEP rules may override general ones.
 14. You support the lab's experts; you do not make the final classification. Do not invent patient details."""
 
 TOOLS = [
@@ -45,7 +45,8 @@ TOOLS = [
     {"type": "function", "function": {
         "name": "lookup_gene",
         "description": (
-            "Look up one gene by official HGNC symbol: gnomAD v4.1 constraint (pLI, LOEUF, "
+            "Look up one gene by official HGNC symbol: ClinGen gene-disease validity "
+            "(Definitive/Strong/Moderate/...), gnomAD v4.1 constraint (pLI, LOEUF, "
             "missense z), ClinGen dosage sensitivity (haploinsufficiency/triplosensitivity "
             "scores), diseases linked in HPO/OMIM/Orphanet with inheritance, and counts of "
             "ClinVar variants by classification."),
@@ -166,6 +167,13 @@ def _summary(name: str, r: dict) -> str:
                         else f"LOEUF {c['LOEUF']}")
         if r.get("clingen_dosage_sensitivity"):
             bits.append(f"HI score {r['clingen_dosage_sensitivity']['haploinsufficiency_score']}")
+        v = r.get("clingen_gene_validity")
+        if isinstance(v, list) and v:
+            best = [x for x in v if x["classification"] == "Definitive"]
+            bits.append(f"ClinGen validity: {len(v)} curation(s)"
+                        + (f", {len(best)} Definitive" if best else ""))
+        elif v:
+            bits.append("no ClinGen validity curation")
         if r.get("diseases"):
             bits.append(f"{len(r['diseases'])} linked diseases")
         return " · ".join(bits) or "found"

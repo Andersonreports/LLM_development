@@ -740,12 +740,50 @@ def lookup_gene(symbol: str) -> dict:
             summary["total_records"] = sum(by.values())
             out["clinvar_counts"] = summary
             out["sources"].append(_src_clinvar())
+    validity, created = _gene_validity(gene)
+    if validity is not None:
+        out["clingen_gene_validity"] = validity or (
+            "no ClinGen gene-disease validity curation for this gene")
+        out["sources"].append(f"ClinGen gene-disease validity (public, file of {created})")
     if not out["sources"]:
         return {"gene": gene, "error": "gene symbol not found in any local source. Check the "
                 "official HGNC symbol (old aliases such as GBA for GBA1 are not resolved)."}
-    out["note"] = ("ClinGen here is the dosage-sensitivity curation only, not gene-disease "
-                   "validity. Disease links are from HPO/OMIM/Orphanet annotations.")
+    out["note"] = ("clingen_gene_validity = ClinGen's expert curation of how strong each "
+                   "gene-disease link is (Definitive/Strong/Moderate/Limited/Disputed/Refuted). "
+                   "'diseases' are HPO/OMIM/Orphanet annotations, which are not validity "
+                   "assessments. clingen_dosage_sensitivity is a separate curation.")
     return out
+
+
+_VALIDITY: tuple[dict, str] | None = None
+
+
+def _gene_validity(gene: str) -> tuple[list[dict] | None, str]:
+    """ClinGen gene-disease validity rows for a gene, from the downloaded CSV
+    (webui/knowledge/fetch_public.py). (None, '') if the file has not been downloaded."""
+    global _VALIDITY
+    if _VALIDITY is None:
+        path = settings.genetics_db.parent / "clingen_gene_validity.csv"
+        if not path.exists():
+            return None, ""
+        import csv
+        by_gene: dict[str, list[dict]] = {}
+        created = ""
+        with open(path, encoding="utf-8", newline="") as fh:
+            for row in csv.reader(fh):
+                if not row:
+                    continue
+                if row[0].startswith("FILE CREATED"):
+                    created = row[0].split(":", 1)[1].strip()
+                if len(row) < 10 or row[0] in ("GENE SYMBOL",) or row[0].startswith("+"):
+                    continue
+                by_gene.setdefault(row[0].upper(), []).append({
+                    "disease": row[2], "mondo": row[3], "inheritance": row[4],
+                    "classification": row[6], "date": row[8][:10], "gcep": row[9],
+                    "url": row[7]})
+        _VALIDITY = (by_gene, created)
+    by_gene, created = _VALIDITY
+    return by_gene.get(gene, []), created
 
 
 # --------------------------------------------------------------------------- phenotypes

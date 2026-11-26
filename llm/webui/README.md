@@ -68,6 +68,13 @@ wsl -d Ubuntu -u root -- python3 \
 
 About 1 minute; ~1.3 GB (git-ignored). Restart the UI afterwards.
 
+**ClinGen gene-disease validity** (Definitive/Strong/Moderate/... per gene-disease pair) is a
+small public file read directly. Download or refresh it from `llm/`:
+
+```bash
+.venv\Scripts\python.exe -m webui.knowledge.fetch_public   # -> data/clingen_gene_validity.csv
+```
+
 Limits worth knowing: lookups fix *facts*, not *reasoning* - general answers (e.g. ACMG
 rule details) still come from the model's memory and can be wrong. Gene aliases are not
 resolved (use `GBA1`, not `GBA`). Groq's free tier allows 8,000 tokens/minute on
