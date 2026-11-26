@@ -1,0 +1,6 @@
+# Tabular ML (CPU only). numpy / pandas / scipy are inherited from the system Python;
+# scikit-learn provides HistGradientBoosting, GroupKFold and quadratic-weighted kappa.
+scikit-learn>=1.4
+# optional: faster/alternative learners and explanations
+# xgboost>=2.0
+# shap>=0.44

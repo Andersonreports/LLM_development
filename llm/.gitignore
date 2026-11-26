@@ -1,6 +1,8 @@
 .venv/
 __pycache__/
 .pytest_cache/
+# local secrets and overrides for the web UI (Groq key lives here)
+.env
 # downloaded corpora, encoded token files and trained weights are regenerated, not committed
 data/
 checkpoints/

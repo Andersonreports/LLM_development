@@ -1,0 +1,3 @@
+# Extra packages for the chat UI (on top of the model's own requirements.txt: torch, numpy).
+flask>=3.0
+httpx>=0.27

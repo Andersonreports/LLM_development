@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en" data-backend="{{ default_backend }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ADVAT LLM &middot; chat</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="layout">
+    <!-- ------------------------------------------------ history sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="side-head">
+        <span>Training history</span>
+        <div class="side-actions">
+          <button id="trainBtn" class="trainbtn" title="Train a model">+ Train</button>
+          <button id="refreshRuns" class="iconbtn sm" title="Refresh" aria-label="Refresh">&#8635;</button>
+        </div>
+      </div>
+      <p class="side-sub" id="runsRoot">models you've trained</p>
+      <div class="runs" id="runs">
+        <p class="runs-empty">Loading&hellip;</p>
+      </div>
+    </aside>
+
+    <!-- ------------------------------------------------ main column -->
+    <div class="main">
+      <header class="topbar">
+        <div class="left">
+          <button id="menuBtn" class="iconbtn only-narrow" title="History" aria-label="History">&#9776;</button>
+          <div class="brand">ADVAT&nbsp;LLM<span class="sub">chat</span></div>
+        </div>
+        <div class="controls">
+          <label class="seg" title="Which model answers">
+            <select id="backend">
+              <option value="groq">Groq (cloud)</option>
+              <option value="tinygpt">tinygpt (local)</option>
+            </select>
+          </label>
+          <label class="seg" id="modelWrap" title="Model">
+            <select id="model"></select>
+          </label>
+          <button id="themeBtn" class="iconbtn" title="Toggle light / dark" aria-label="Theme">&#9680;</button>
+          <button id="settingsBtn" class="iconbtn" title="Generation settings" aria-label="Settings">&#9881;</button>
+          <button id="clearBtn" class="iconbtn" title="Clear conversation" aria-label="Clear">&#10005;</button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <section id="settings" class="settings" hidden>
+        <label>Temperature <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.8"></label>
+        <label>Max tokens <input id="maxTokens" type="number" min="1" max="4096" step="1" value="512"></label>
+        <label>Top-k <input id="topK" type="number" min="0" max="500" step="1" value="40"></label>
+      </section>
+
+      <main id="chat" class="chat">
+        <div class="empty" id="empty">
+          <h1>Talk to the model</h1>
+          <p id="emptyHint">Pick a backend above and send a message.</p>
+        </div>
+      </main>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <textarea id="input" rows="1" placeholder="Message&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button id="send" type="submit" title="Send">Send</button>
+        <button id="stop" type="button" class="stop" hidden title="Stop">Stop</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="scrim" id="scrim" hidden></div>
+
+  <!-- ------------------------------------------------ training modal -->
+  <div class="modal-wrap" id="trainModal" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h2>Train a model</h2>
+        <button id="trainClose" class="iconbtn sm" aria-label="Close">&#10005;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form">
+          <label class="field">
+            <span>Dataset</span>
+            <select id="dataset"></select>
+          </label>
+
+          <details class="prep">
+            <summary>Prepare a new dataset</summary>
+            <div class="prep-body">
+              <p class="hint">Upload a plain-text <code>.txt</code> file to train on &mdash; your own
+                biological or clinical text (e.g. DNA/protein sequences, variant notes, reports).</p>
+              <div class="prep-row">
+                <input type="file" id="corpusFile" accept=".txt,text/plain">
+                <input type="text" id="corpusName" placeholder="name (optional)">
+                <button id="prepUpload" class="ghost" type="button">Prepare upload</button>
+              </div>
+              <p class="hint" id="prepMsg"></p>
+            </div>
+          </details>
+
+          <div class="grid2">
+            <label class="field"><span>Run name</span><input type="text" id="runName" placeholder="my_run"></label>
+            <label class="field"><span>Size</span>
+              <select id="preset">
+                <option value="tiny">tiny &middot; ~1M &middot; CPU-friendly</option>
+                <option value="small" selected>small &middot; ~12M &middot; needs GPU</option>
+                <option value="medium">medium &middot; ~30M &middot; 6GB GPU</option>
+              </select>
+            </label>
+            <label class="field"><span>Iterations</span><input type="number" id="maxIters" value="500" min="10" max="100000" step="50"></label>
+            <label class="field"><span>Device</span>
+              <select id="device"><option value="auto">auto</option><option value="cpu">cpu</option><option value="cuda">cuda (GPU)</option></select>
+            </label>
+          </div>
+
+          <div class="form-actions">
+            <button id="startTrain" class="primary" type="button">Start training</button>
+            <button id="stopTrain" class="danger" type="button" hidden>Stop</button>
+          </div>
+        </div>
+
+        <div class="live" id="live" hidden>
+          <div class="live-stat" id="liveStat"></div>
+          <svg class="live-curve" id="liveCurve" viewBox="0 0 400 90" preserveAspectRatio="none"></svg>
+          <div class="live-sample" id="liveSample"></div>
+          <pre class="live-log" id="liveLog"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
