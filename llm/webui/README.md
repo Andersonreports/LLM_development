@@ -75,6 +75,18 @@ small public file read directly. Download or refresh it from `llm/`:
 .venv\Scripts\python.exe -m webui.knowledge.fetch_public   # -> data/clingen_gene_validity.csv
 ```
 
+**Guideline texts** (the `search_guidelines` tool): the original ACMG/AMP 2015 paper, the
+ClinGen SVI recommendation papers (PVS1, PP3/BP4, PS3/BS3, BA1, PP1/BS4/PP4, PP5/BP6, points,
+Bayesian, CNV), and every released ClinGen expert-panel (VCEP) specification, full text, split
+into a searchable index so rule answers quote the source. Download + build from `llm/`:
+
+```bash
+.venv\Scripts\python.exe -m webui.knowledge.guidelines all   # -> data/guidelines.sqlite
+```
+
+A few minutes; open-access text only (2-3 papers with no open full text are skipped). Without
+it the chat still works; `search_guidelines` just reports the index is missing.
+
 Limits worth knowing: lookups fix *facts*, not *reasoning* - general answers (e.g. ACMG
 rule details) still come from the model's memory and can be wrong. Gene aliases are not
 resolved (use `GBA1`, not `GBA`). Groq's free tier allows 8,000 tokens/minute on

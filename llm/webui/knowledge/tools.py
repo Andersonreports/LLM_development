@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from . import acmg, lookup
+from . import acmg, guidelines, lookup
 
 SYSTEM_PROMPT = """You are ADVAT, a genetics and bioinformatics assistant for a clinical genomics laboratory (Anderson Diagnostics & Labs). Your users are geneticists and bioinformaticians.
 
@@ -15,7 +15,7 @@ Rules:
 1. For any specific fact about a variant (classification, review status, rsID, position, population frequency), a gene (constraint, dosage sensitivity, associated diseases, inheritance, ClinVar counts) or an HPO term, call the matching tool first and answer from its result.
 2. Cite where each fact came from, e.g. "ClinVar (local, 2026-10-19): Pathogenic, 3 stars". Give a release date ONLY if it appears in that same source's own entry in "sources"; never copy one source's date (e.g. ClinVar's) onto another. Include the ClinVar or gnomAD link when one is returned.
 3. If a tool returns an error, nothing, or several candidates, say so plainly. Never fill the gap from memory with variant IDs, frequencies, classifications, scores or PMIDs.
-4. General knowledge (ACMG/AMP criteria, HGVS rules, file formats, pipelines, inheritance concepts) you may answer yourself; say when you are unsure.
+4. For the exact wording, strength, threshold or gene-specific form of an ACMG/AMP or ClinGen rule, call search_guidelines (pass the gene so its VCEP rules come first) and quote the returned passage with its citation. A gene's VCEP specification overrides the general guidance; if one exists, use it. acmg_criterion gives a quick definition, but search_guidelines is the authority. Other general knowledge (HGVS rules, file formats, pipelines, inheritance concepts) you may answer yourself; say when you are unsure.
 5. Coordinates are GRCh38. An allele frequency is per allele (chromosome), not per person: write e.g. "0.00012, about 1 in 8,300 alleles". For a rare heterozygous variant the carrier frequency is about twice the allele frequency; say so if you mention carriers.
 6. Format: short paragraphs, "-" lists, **bold** for key results, and a markdown table when listing several criteria or variants. No headings, and no citation markers such as 【...】; name the source in words instead. Be concise: one row or line per point, no repetition between a table and a summary.
 7. Look each variant or gene up once; do not repeat a lookup by another name for something already returned.
@@ -73,6 +73,21 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "code": {"type": "string", "description": "one or more criterion codes, comma-separated; or 'combining' or 'all'"}},
             "required": ["code"]}}},
+    {"type": "function", "function": {
+        "name": "search_guidelines",
+        "description": (
+            "Search the FULL TEXT of the original variant-interpretation guidelines and "
+            "ClinGen expert-panel (VCEP) specifications: ACMG/AMP 2015, the ClinGen SVI "
+            "recommendations (PVS1, PP3/BP4, PS3/BS3, BA1, PP1/BS4/PP4, PP5/BP6, points and "
+            "Bayesian framework, CNVs), and per-gene VCEP rules. Use for the exact wording, "
+            "strength or threshold of a criterion, especially gene-specific rules; pass the "
+            "gene so its VCEP rules (which override the general guidance) come first. Returns "
+            "quoted passages with citations. Search ONCE with all your key terms in the "
+            "query; do not call it repeatedly for the same criterion."),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "what to find, e.g. 'PM2 threshold' or 'PVS1 last exon NMD'"},
+            "gene": {"type": "string", "description": "optional HGNC gene symbol to prioritise its VCEP rules"}},
+            "required": ["query"]}}},
 ]
 
 # Each tool takes one string. Accept it under any argument name: models sometimes
@@ -82,10 +97,12 @@ _FUNCS = {
     "lookup_gene": lookup.lookup_gene,
     "lookup_phenotype": lookup.lookup_phenotype,
     "acmg_criterion": acmg.acmg_criterion,
+    "search_guidelines": lambda a: guidelines.search(a.get("query", ""), gene=a.get("gene"))
+        if isinstance(a, dict) else guidelines.search(str(a)),
 }
 
 LABELS = {"lookup_variant": "variant", "lookup_gene": "gene", "lookup_phenotype": "phenotype",
-          "acmg_criterion": "ACMG rule"}
+          "acmg_criterion": "ACMG rule", "search_guidelines": "guidelines"}
 
 
 def available() -> tuple[bool, str]:
@@ -103,6 +120,15 @@ def run(name: str, raw_args: str) -> tuple[dict, dict]:
                                                   "ok": False, "summary": "bad arguments"}
     query = next(iter(args.values()), "") if args else ""
     fn = _FUNCS.get(name)
+    if name == "search_guidelines":
+        try:
+            result = guidelines.search(args.get("query", ""), gene=args.get("gene"))
+        except Exception as e:  # noqa: BLE001
+            result = {"error": f"{type(e).__name__}: {e}"}
+        ev = {"name": name, "label": "guidelines", "query": args.get("query", ""),
+              "ok": "error" not in result, "summary": _summary(name, result),
+              "sources": [result.get("source")] if result.get("source") else [], "links": []}
+        return result, ev
     if fn is None:
         return {"error": f"unknown tool {name}"}, {"name": name, "query": query, "ok": False,
                                                    "summary": "unknown tool"}
@@ -177,6 +203,11 @@ def _summary(name: str, r: dict) -> str:
         if r.get("diseases"):
             bits.append(f"{len(r['diseases'])} linked diseases")
         return " · ".join(bits) or "found"
+    if name == "search_guidelines":
+        n = len(r.get("passages", []))
+        v = r.get("vcep_specifications_for_gene")
+        extra = f", {len(v)} VCEP spec(s)" if isinstance(v, list) and v else ""
+        return f"{n} passage(s){extra}" if n else (r.get("error") or "no passages")
     if name == "acmg_criterion":
         if r.get("code"):
             return f"{r['code']}: {r['strength']}"
