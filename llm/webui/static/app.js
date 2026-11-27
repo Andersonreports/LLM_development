@@ -168,13 +168,14 @@ async function refreshStatus() {
   updateBanner();
 }
 
+const CHAT_BACKENDS = new Set(["groq", "ollama"]);
 function updateBanner() {
   const b = status[backendSel.value];
-  modelWrap.style.display = backendSel.value === "groq" ? "" : "none";
+  modelWrap.style.display = CHAT_BACKENDS.has(backendSel.value) ? "" : "none";
   if (!b) { banner.hidden = true; return; }
   banner.classList.toggle("ok", b.available);
   if (!b.available) banner.textContent = "⚠ " + b.reason + "  —  " + b.describe;
-  else banner.textContent = (backendSel.value === "groq" ? "☁ " : "🔒 ") + b.describe;
+  else banner.textContent = (backendSel.value === "groq" ? "☁ " : "🔒 ") + b.describe;  // ollama/tinygpt = local
   banner.hidden = false;
 }
 
@@ -191,10 +192,10 @@ function modelKind(id) {
 }
 
 async function loadModels() {
-  if (backendSel.value !== "groq") { modelSel.innerHTML = ""; return; }
+  if (!CHAT_BACKENDS.has(backendSel.value)) { modelSel.innerHTML = ""; return; }
   modelSel.innerHTML = "<option>loading…</option>";
   try {
-    const r = await fetch("/api/models?backend=groq");
+    const r = await fetch("/api/models?backend=" + backendSel.value);
     const { models, default: def } = await r.json();
     modelSel.innerHTML = "";
     if (!models.length) { modelSel.innerHTML = `<option value="">(no models — set GROQ_API_KEY)</option>`; return; }
@@ -277,7 +278,7 @@ async function send(text) {
         else if (ev.delta) {
           acc += ev.delta;
           // Chat models: light formatting. tinygpt: raw text, exactly as generated.
-          if (backendSel.value === "groq") { parts(); textEl.innerHTML = formatAnswer(acc); }
+          if (CHAT_BACKENDS.has(backendSel.value)) { parts(); textEl.innerHTML = formatAnswer(acc); }
           else bubble.textContent = acc;
           scrollDown();
         }

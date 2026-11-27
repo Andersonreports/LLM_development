@@ -286,6 +286,121 @@ def _first_arg(raw: str) -> str:
         return ""
 
 
+# --------------------------------------------------------------------------- Ollama (local)
+class OllamaBackend:
+    """A model served locally by Ollama - private, no rate limit, same genetics lookups as
+    Groq. Mirrors the Groq tool-calling loop against Ollama's /api/chat."""
+    name = "ollama"
+    kind = "chat"
+    MAX_TOOL_ROUNDS = 5
+
+    def _tags(self) -> list[str]:
+        r = httpx.get(f"{settings.ollama_url}/api/tags", timeout=4)
+        return [m["name"] for m in r.json().get("models", [])]
+
+    def available(self) -> tuple[bool, str]:
+        try:
+            names = self._tags()
+        except httpx.HTTPError:
+            return False, (f"Ollama not reachable at {settings.ollama_url} - is it running? "
+                           f"(start it, or set OLLAMA_URL)")
+        want = settings.ollama_model
+        if want not in names and want.split(":")[0] not in {n.split(":")[0] for n in names}:
+            return False, (f"model '{want}' not installed in Ollama (have: "
+                           f"{', '.join(names) or 'none'}). Run: ollama pull {want}")
+        return True, "ready"
+
+    def tools_status(self) -> tuple[bool, str]:
+        if not settings.genetics_tools:
+            return False, "off (GENETICS_TOOLS=false)"
+        from .knowledge import tools
+        return tools.available()
+
+    def describe(self) -> str:
+        ok, why = self.tools_status()
+        tools_txt = ("genetics lookups ON (ClinVar, VEP, gnomAD, ClinGen, guidelines)"
+                     if ok else f"genetics lookups {why}")
+        return (f"Local model {settings.ollama_model} via Ollama · {tools_txt} - "
+                f"runs on this machine, nothing leaves")
+
+    def list_models(self) -> list[str]:
+        try:
+            return sorted(self._tags())
+        except httpx.HTTPError:
+            return []
+
+    def stream(self, messages: list[dict], params: GenParams,
+               model: str | None = None) -> Iterator[str | dict]:
+        ok, reason = self.available()
+        if not ok:
+            raise BackendError(reason)
+        use_tools, _ = self.tools_status()
+        from .knowledge import tools
+        msgs = list(messages)
+        if use_tools and not any(m.get("role") == "system" for m in msgs):
+            msgs.insert(0, {"role": "system", "content": tools.SYSTEM_PROMPT})
+        mdl = model or settings.ollama_model
+
+        for round_no in range(self.MAX_TOOL_ROUNDS + 1):
+            body = {
+                "model": mdl, "messages": msgs, "stream": True, "think": False,
+                "options": {"temperature": params.temperature,
+                            "num_ctx": settings.ollama_num_ctx,
+                            "num_predict": max(params.max_tokens, 2048)},
+            }
+            if use_tools and round_no < self.MAX_TOOL_ROUNDS:
+                body["tools"] = tools.TOOLS
+
+            text: list[str] = []
+            calls: list[dict] = []
+            for kind, value in self._stream_once(body):
+                if kind == "text":
+                    text.append(value)
+                    yield value
+                else:
+                    calls.append(value)
+            if not calls:
+                return
+
+            msgs.append({"role": "assistant", "content": "".join(text), "tool_calls": calls})
+            for c in calls:
+                fn = c.get("function") or {}
+                name = fn.get("name", "")
+                raw = fn.get("arguments")
+                args_str = json.dumps(raw) if isinstance(raw, dict) else str(raw or "{}")
+                yield {"tool": {"name": name, "status": "running", "query": _first_arg(args_str)}}
+                result, event = tools.run(name, args_str)
+                yield {"tool": {**event, "status": "done"}}
+                msgs.append({"role": "tool", "tool_name": name,
+                             "content": json.dumps(result, ensure_ascii=False,
+                                                   separators=(",", ":"))[:8000]})
+
+    def _stream_once(self, body: dict) -> Iterator[tuple[str, object]]:
+        """One streamed Ollama request -> ("text", str) and ("call", tool_call dict) items."""
+        try:
+            with httpx.stream("POST", f"{settings.ollama_url}/api/chat", json=body,
+                              timeout=settings.request_timeout) as r:
+                if r.status_code != 200:
+                    detail = r.read().decode("utf-8", "replace")[:500]
+                    raise BackendError(f"Ollama returned HTTP {r.status_code}: {detail}")
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("error"):
+                        raise BackendError(f"Ollama error: {chunk['error']}")
+                    msg = chunk.get("message") or {}
+                    if msg.get("content"):
+                        yield "text", msg["content"]
+                    for tc in msg.get("tool_calls") or []:
+                        yield "call", tc
+        except httpx.HTTPError as e:
+            raise BackendError(f"could not reach Ollama at {settings.ollama_url}: {e}") from e
+
+
 # --------------------------------------------------------------------------- tinygpt
 _GEN_LOCK = threading.Lock()  # one generation at a time on the single model instance
 
@@ -407,7 +522,8 @@ class TinyGPTBackend:
 
 
 # --------------------------------------------------------------------------- registry
-_INSTANCES: dict[str, object] = {"groq": GroqBackend(), "tinygpt": TinyGPTBackend()}
+_INSTANCES: dict[str, object] = {"groq": GroqBackend(), "ollama": OllamaBackend(),
+                                 "tinygpt": TinyGPTBackend()}
 
 
 def get_backend(name: str | None):
@@ -419,7 +535,7 @@ def get_backend(name: str | None):
 
 def all_status() -> list[dict]:
     out = []
-    for key in ("groq", "tinygpt"):
+    for key in ("ollama", "groq", "tinygpt"):
         b = _INSTANCES[key]
         ok, reason = b.available()
         out.append({"name": key, "kind": b.kind, "available": ok,

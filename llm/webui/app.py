@@ -41,6 +41,9 @@ def models():
     if name == "groq":
         return jsonify({"models": get_backend("groq").list_models(),
                         "default": settings.groq_model})
+    if name == "ollama":
+        return jsonify({"models": get_backend("ollama").list_models(),
+                        "default": settings.ollama_model})
     # tinygpt has exactly one "model": the loaded checkpoint.
     return jsonify({"models": [settings.tinygpt_ckpt.name], "default": settings.tinygpt_ckpt.name})
 

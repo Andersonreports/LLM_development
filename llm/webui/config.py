@@ -43,6 +43,11 @@ class Settings:
     # list from /models; if this id is gone, pick another from the dropdown.
     groq_model: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
 
+    # ---- Ollama (local model: private, no rate limit, runs on this machine) ----
+    ollama_url: str = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+    ollama_model: str = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
+    ollama_num_ctx: int = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
+
     # ---- genetics knowledge (Groq only) ----
     # Local SQLite built by webui/knowledge/build_db.py from the AI-Analyser resources.
     genetics_db: Path = Path(os.environ.get(
